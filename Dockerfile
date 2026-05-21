@@ -6,8 +6,12 @@ WORKDIR /src
 COPY Makefile ./
 COPY include ./include
 COPY src ./src
+COPY tests ./tests
 
 RUN make clean && make
+
+FROM build AS test
+RUN make test
 
 FROM debian:bookworm-slim AS runtime
 WORKDIR /app
