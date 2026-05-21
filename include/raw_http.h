@@ -7,6 +7,7 @@
 
 #include "ivf8_index.h"
 #include "ivf8_search.h"
+#include "metrics.h"
 
 typedef enum {
     RAW_HTTP_METHOD_OTHER = 0,
@@ -17,7 +18,8 @@ typedef enum {
 typedef enum {
     RAW_HTTP_PATH_OTHER = 0,
     RAW_HTTP_PATH_READY = 1,
-    RAW_HTTP_PATH_FRAUD_SCORE = 2
+    RAW_HTTP_PATH_FRAUD_SCORE = 2,
+    RAW_HTTP_PATH_DEBUG_INFO = 3
 } raw_http_path;
 
 typedef struct {
@@ -28,6 +30,11 @@ typedef struct {
 typedef struct {
     const Ivf8Index *index;
     Ivf8SearchConfig search_config;
+    RinhaMetrics *metrics;
+    const char *listen_mode;
+    const char *exec_mode;
+    uint32_t workers;
+    uint32_t queue_size;
 } raw_http_app;
 
 int raw_http_serve(const char *addr, const raw_http_app *app);

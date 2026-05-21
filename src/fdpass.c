@@ -3,6 +3,7 @@
 #include "fdpass.h"
 
 #include "config.h"
+#include "fd_queue.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -26,8 +27,15 @@ typedef struct {
 
 typedef struct {
     int control_fd;
-    const raw_http_app *app;
+    struct fdpass_runtime *runtime;
 } fdpass_control_arg;
+
+typedef struct fdpass_runtime {
+    const raw_http_app *app;
+    fdpass_options options;
+    FdQueue queue;
+    bool queue_ready;
+} fdpass_runtime;
 
 static int mkdir_parent(const char *path) {
     const char *slash = strrchr(path, '/');
@@ -165,6 +173,14 @@ static void *fdpass_client_thread(void *arg) {
     return NULL;
 }
 
+static RinhaMetrics *runtime_metrics(const fdpass_runtime *runtime) {
+    if (runtime == NULL || runtime->app == NULL ||
+        runtime->app->metrics == NULL || !runtime->app->metrics->enabled) {
+        return NULL;
+    }
+    return runtime->app->metrics;
+}
+
 static void start_client_thread(int client_fd, const raw_http_app *app) {
     fdpass_client_arg *arg = (fdpass_client_arg *)malloc(sizeof(*arg));
     if (arg == NULL) {
@@ -183,17 +199,87 @@ static void start_client_thread(int client_fd, const raw_http_app *app) {
     (void)pthread_detach(thread);
 }
 
+static void handle_client_fd(int client_fd, const raw_http_app *app) {
+    tune_client_fd(client_fd);
+    (void)raw_http_handle_connection(client_fd, app);
+    close(client_fd);
+}
+
+static void *fdpass_worker_thread(void *arg) {
+    fdpass_runtime *runtime = (fdpass_runtime *)arg;
+    RinhaMetrics *metrics = runtime_metrics(runtime);
+    for (;;) {
+        FdQueueItem item;
+        if (!fd_queue_pop(&runtime->queue, &item)) {
+            break;
+        }
+        if (metrics != NULL) {
+            metrics_inc(&metrics->fd_queue_dequeued);
+            metrics_observe(&metrics->queue_wait, metrics_now_ns() - item.enqueued_ns);
+        }
+        handle_client_fd(item.fd, runtime->app);
+    }
+    return NULL;
+}
+
+static int start_worker_threads(fdpass_runtime *runtime) {
+    if (runtime->options.workers == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    for (uint32_t i = 0; i < runtime->options.workers; i++) {
+        pthread_t thread;
+        if (pthread_create(&thread, NULL, fdpass_worker_thread, runtime) != 0) {
+            return -1;
+        }
+        (void)pthread_detach(thread);
+    }
+    return 0;
+}
+
+static void dispatch_client_fd(fdpass_runtime *runtime, int client_fd) {
+    RinhaMetrics *metrics = runtime_metrics(runtime);
+    if (metrics != NULL) {
+        metrics_inc(&metrics->adopted_fds);
+    }
+
+    if (runtime->options.exec_mode == FDPASS_EXEC_WORKER_POOL) {
+        uint64_t now = metrics != NULL ? metrics_now_ns() : 0u;
+        if (fd_queue_push(&runtime->queue, client_fd, now)) {
+            if (metrics != NULL) {
+                metrics_inc(&metrics->fd_queue_enqueued);
+            }
+            return;
+        }
+        if (metrics != NULL) {
+            metrics_inc(&metrics->fd_queue_dropped);
+        }
+        close(client_fd);
+        return;
+    }
+
+    start_client_thread(client_fd, runtime->app);
+}
+
 static void *fdpass_control_thread(void *arg) {
     fdpass_control_arg *control = (fdpass_control_arg *)arg;
     int control_fd = control->control_fd;
-    const raw_http_app *app = control->app;
+    fdpass_runtime *runtime = control->runtime;
+    RinhaMetrics *metrics = runtime_metrics(runtime);
     free(control);
 
     for (;;) {
+        uint64_t start = metrics != NULL ? metrics_now_ns() : 0u;
         int client_fd = fdpass_recv_one_fd(control_fd);
+        if (metrics != NULL) {
+            metrics_observe(&metrics->fdpass_receive, metrics_now_ns() - start);
+        }
         if (client_fd >= 0) {
-            start_client_thread(client_fd, app);
+            dispatch_client_fd(runtime, client_fd);
             continue;
+        }
+        if (metrics != NULL && client_fd != -2) {
+            metrics_inc(&metrics->fdpass_receive_errors);
         }
         break;
     }
@@ -202,14 +288,14 @@ static void *fdpass_control_thread(void *arg) {
     return NULL;
 }
 
-static void start_control_thread(int control_fd, const raw_http_app *app) {
+static void start_control_thread(int control_fd, fdpass_runtime *runtime) {
     fdpass_control_arg *arg = (fdpass_control_arg *)malloc(sizeof(*arg));
     if (arg == NULL) {
         close(control_fd);
         return;
     }
     arg->control_fd = control_fd;
-    arg->app = app;
+    arg->runtime = runtime;
 
     pthread_t thread;
     if (pthread_create(&thread, NULL, fdpass_control_thread, arg) != 0) {
@@ -220,7 +306,25 @@ static void start_control_thread(int control_fd, const raw_http_app *app) {
     (void)pthread_detach(thread);
 }
 
-int fdpass_serve(const char *control_path, const raw_http_app *app) {
+static fdpass_options normalize_options(const fdpass_options *options) {
+    fdpass_options normalized = {
+        .exec_mode = FDPASS_EXEC_PER_CONNECTION,
+        .workers = RINHA_DEFAULT_WORKERS,
+        .queue_size = RINHA_DEFAULT_FD_QUEUE_SIZE,
+    };
+    if (options != NULL) {
+        normalized = *options;
+    }
+    if (normalized.workers == 0) {
+        normalized.workers = RINHA_DEFAULT_WORKERS;
+    }
+    if (normalized.queue_size == 0) {
+        normalized.queue_size = RINHA_DEFAULT_FD_QUEUE_SIZE;
+    }
+    return normalized;
+}
+
+int fdpass_serve(const char *control_path, const raw_http_app *app, const fdpass_options *options) {
     if (control_path == NULL || control_path[0] == '\0') {
         errno = EINVAL;
         return -1;
@@ -233,8 +337,28 @@ int fdpass_serve(const char *control_path, const raw_http_app *app) {
         return -1;
     }
 
+    fdpass_runtime runtime;
+    memset(&runtime, 0, sizeof(runtime));
+    runtime.app = app;
+    runtime.options = normalize_options(options);
+    if (runtime.options.exec_mode == FDPASS_EXEC_WORKER_POOL) {
+        if (fd_queue_init(&runtime.queue, runtime.options.queue_size) != 0) {
+            return -1;
+        }
+        runtime.queue_ready = true;
+        if (start_worker_threads(&runtime) != 0) {
+            fd_queue_close(&runtime.queue);
+            fd_queue_destroy(&runtime.queue);
+            return -1;
+        }
+    }
+
     int server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (server_fd < 0) {
+        if (runtime.queue_ready) {
+            fd_queue_close(&runtime.queue);
+            fd_queue_destroy(&runtime.queue);
+        }
         return -1;
     }
 
@@ -246,6 +370,10 @@ int fdpass_serve(const char *control_path, const raw_http_app *app) {
     (void)unlink(control_path);
     if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         close(server_fd);
+        if (runtime.queue_ready) {
+            fd_queue_close(&runtime.queue);
+            fd_queue_destroy(&runtime.queue);
+        }
         return -1;
     }
     (void)chmod(control_path, 0666);
@@ -253,6 +381,10 @@ int fdpass_serve(const char *control_path, const raw_http_app *app) {
     if (listen(server_fd, RINHA_LISTEN_BACKLOG) != 0) {
         close(server_fd);
         (void)unlink(control_path);
+        if (runtime.queue_ready) {
+            fd_queue_close(&runtime.queue);
+            fd_queue_destroy(&runtime.queue);
+        }
         return -1;
     }
 
@@ -263,8 +395,12 @@ int fdpass_serve(const char *control_path, const raw_http_app *app) {
                 continue;
             }
             close(server_fd);
+            if (runtime.queue_ready) {
+                fd_queue_close(&runtime.queue);
+                fd_queue_destroy(&runtime.queue);
+            }
             return -1;
         }
-        start_control_thread(control_fd, app);
+        start_control_thread(control_fd, &runtime);
     }
 }

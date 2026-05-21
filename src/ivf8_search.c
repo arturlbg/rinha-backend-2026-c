@@ -1,6 +1,7 @@
 #include "ivf8_search.h"
 
 #include <limits.h>
+#include <stdbool.h>
 #include <string.h>
 
 static uint32_t normalized_probe_count(const Ivf8Index *idx, const Ivf8SearchConfig *cfg) {
@@ -22,6 +23,33 @@ static uint32_t normalized_max_candidates(const Ivf8SearchConfig *cfg) {
         return cfg->max_candidates;
     }
     return IVF8_SEARCH_DEFAULT_MAX_CANDIDATES;
+}
+
+static Ivf8SearchImpl normalized_impl(const Ivf8SearchConfig *cfg) {
+    if (cfg == NULL || cfg->impl != IVF8_SEARCH_IMPL_AVX2) {
+        return IVF8_SEARCH_IMPL_SCALAR;
+    }
+    return ivf8_cpu_supports_avx2() ? IVF8_SEARCH_IMPL_AVX2 : IVF8_SEARCH_IMPL_SCALAR;
+}
+
+Ivf8SearchImpl ivf8_search_impl_from_string(const char *value, bool *ok) {
+    if (ok != NULL) {
+        *ok = true;
+    }
+    if (value == NULL || value[0] == '\0' || strcmp(value, "scalar") == 0) {
+        return IVF8_SEARCH_IMPL_SCALAR;
+    }
+    if (strcmp(value, "avx2") == 0) {
+        return IVF8_SEARCH_IMPL_AVX2;
+    }
+    if (ok != NULL) {
+        *ok = false;
+    }
+    return IVF8_SEARCH_IMPL_SCALAR;
+}
+
+const char *ivf8_search_impl_name(Ivf8SearchImpl impl) {
+    return impl == IVF8_SEARCH_IMPL_AVX2 ? "avx2" : "scalar";
 }
 
 static void insert_probe(Ivf8Probe probes[IVF8_SEARCH_MAX_PROBES], uint32_t n, Ivf8Probe candidate) {
@@ -138,6 +166,46 @@ uint32_t ivf8_select_probes(const Ivf8Index *idx,
     return probe_count;
 }
 
+static uint32_t ivf8_select_probes_avx2(const Ivf8Index *idx,
+                                        const int16_t query[IVF8_INDEX_DIMS],
+                                        uint32_t probe_count,
+                                        Ivf8Probe probes[IVF8_SEARCH_MAX_PROBES]) {
+    if (idx == NULL || query == NULL || probes == NULL || probe_count == 0) {
+        return 0;
+    }
+    if (probe_count > idx->k) {
+        probe_count = idx->k;
+    }
+    if (probe_count > IVF8_SEARCH_MAX_PROBES) {
+        probe_count = IVF8_SEARCH_MAX_PROBES;
+    }
+    for (uint32_t i = 0; i < IVF8_SEARCH_MAX_PROBES; i++) {
+        probes[i].cluster = UINT32_MAX;
+        probes[i].distance = UINT64_MAX;
+    }
+
+    uint32_t cluster = 0;
+    uint64_t distances[IVF8_INDEX_LANES];
+    for (; cluster + IVF8_INDEX_LANES <= idx->k; cluster += IVF8_INDEX_LANES) {
+        ivf8_centroid_distances_avx2(idx, query, cluster, distances);
+        for (uint32_t lane = 0; lane < IVF8_INDEX_LANES; lane++) {
+            Ivf8Probe candidate = {
+                .cluster = cluster + lane,
+                .distance = distances[lane],
+            };
+            insert_probe(probes, probe_count, candidate);
+        }
+    }
+    for (; cluster < idx->k; cluster++) {
+        Ivf8Probe candidate = {
+            .cluster = cluster,
+            .distance = ivf8_centroid_distance(idx, query, cluster),
+        };
+        insert_probe(probes, probe_count, candidate);
+    }
+    return probe_count;
+}
+
 static uint32_t scan_cluster(const Ivf8Index *idx,
                              const int16_t query[IVF8_INDEX_DIMS],
                              uint32_t cluster,
@@ -177,10 +245,52 @@ static uint32_t scan_cluster(const Ivf8Index *idx,
     return scanned;
 }
 
+static uint32_t scan_cluster_avx2(const Ivf8Index *idx,
+                                  const int16_t query[IVF8_INDEX_DIMS],
+                                  uint32_t cluster,
+                                  uint32_t max_candidates,
+                                  Ivf8SearchStats *stats,
+                                  Ivf8Neighbor top[IVF8_SEARCH_TOP_K],
+                                  uint32_t *seq) {
+    uint32_t remaining = idx->counts[cluster];
+    if (remaining == 0) {
+        return 0;
+    }
+
+    uint32_t scanned = 0;
+    uint32_t start_block = idx->offsets[cluster];
+    uint32_t end_block = idx->offsets[cluster + 1u];
+    uint64_t distances[IVF8_INDEX_LANES];
+    for (uint32_t block = start_block;
+         block < end_block && stats->candidates_scanned < max_candidates && remaining > 0;
+         block++) {
+        uint32_t end_lane = IVF8_INDEX_LANES;
+        if (remaining < end_lane) {
+            end_lane = remaining;
+        }
+        ivf8_block_distances_avx2(idx->block_data, block, query, distances);
+        uint32_t label_base = block * IVF8_INDEX_LANES;
+        for (uint32_t lane = 0; lane < end_lane && stats->candidates_scanned < max_candidates; lane++) {
+            Ivf8Neighbor candidate = {
+                .distance = distances[lane],
+                .fraud = idx->labels[label_base + lane] != 0 ? 1u : 0u,
+                .seq = *seq,
+            };
+            ivf8_top5_insert(top, candidate);
+            (*seq)++;
+            stats->candidates_scanned++;
+            scanned++;
+        }
+        remaining -= end_lane;
+    }
+    return scanned;
+}
+
 static void scan_probe(const Ivf8Index *idx,
                        const int16_t query[IVF8_INDEX_DIMS],
                        Ivf8Probe probe,
                        uint32_t max_candidates,
+                       Ivf8SearchImpl impl,
                        Ivf8SearchStats *stats,
                        Ivf8Neighbor top[IVF8_SEARCH_TOP_K],
                        uint32_t *seq) {
@@ -202,7 +312,11 @@ static void scan_probe(const Ivf8Index *idx,
     }
 
     stats->clusters_scanned++;
-    (void)scan_cluster(idx, query, cluster, max_candidates, stats, top, seq);
+    if (impl == IVF8_SEARCH_IMPL_AVX2) {
+        (void)scan_cluster_avx2(idx, query, cluster, max_candidates, stats, top, seq);
+    } else {
+        (void)scan_cluster(idx, query, cluster, max_candidates, stats, top, seq);
+    }
 }
 
 Ivf8SearchResult ivf8_search(const Ivf8Index *idx,
@@ -216,8 +330,13 @@ Ivf8SearchResult ivf8_search(const Ivf8Index *idx,
 
     uint32_t probe_count = normalized_probe_count(idx, cfg);
     uint32_t max_candidates = normalized_max_candidates(cfg);
+    Ivf8SearchImpl impl = normalized_impl(cfg);
     Ivf8Probe probes[IVF8_SEARCH_MAX_PROBES];
-    probe_count = ivf8_select_probes(idx, query, probe_count, probes);
+    if (impl == IVF8_SEARCH_IMPL_AVX2) {
+        probe_count = ivf8_select_probes_avx2(idx, query, probe_count, probes);
+    } else {
+        probe_count = ivf8_select_probes(idx, query, probe_count, probes);
+    }
 
     Ivf8Neighbor top[IVF8_SEARCH_TOP_K];
     ivf8_top5_init(top);
@@ -225,7 +344,7 @@ Ivf8SearchResult ivf8_search(const Ivf8Index *idx,
     result.stats.centroids_scored = idx->k;
     uint32_t seq = 0;
     for (uint32_t probe = 0; probe < probe_count && result.stats.candidates_scanned < max_candidates; probe++) {
-        scan_probe(idx, query, probes[probe], max_candidates, &result.stats, top, &seq);
+        scan_probe(idx, query, probes[probe], max_candidates, impl, &result.stats, top, &seq);
     }
 
     result.fraud_count = ivf8_top5_fraud_count(top);
@@ -237,4 +356,3 @@ uint8_t ivf8_search_fraud_count(const Ivf8Index *idx,
                                 const Ivf8SearchConfig *cfg) {
     return ivf8_search(idx, query, cfg).fraud_count;
 }
-

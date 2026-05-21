@@ -105,6 +105,46 @@ static void test_distance(void) {
     CHECK(ivf8_block_lane_distance(block_data, 0, 0, query) == 25);
 }
 
+static void test_search_impl_parse_and_detection(void) {
+    bool ok = false;
+    CHECK(ivf8_search_impl_from_string("scalar", &ok) == IVF8_SEARCH_IMPL_SCALAR);
+    CHECK(ok);
+    CHECK(ivf8_search_impl_from_string("avx2", &ok) == IVF8_SEARCH_IMPL_AVX2);
+    CHECK(ok);
+    CHECK(ivf8_search_impl_from_string("bogus", &ok) == IVF8_SEARCH_IMPL_SCALAR);
+    CHECK(!ok);
+    CHECK(strcmp(ivf8_search_impl_name(IVF8_SEARCH_IMPL_AVX2), "avx2") == 0);
+}
+
+static void test_avx2_block_distances_match_scalar(void) {
+    if (!ivf8_cpu_supports_avx2()) {
+        return;
+    }
+
+    int16_t query[IVF8_INDEX_DIMS];
+    int16_t block_data[IVF8_INDEX_DIMS * IVF8_INDEX_LANES];
+    for (uint32_t dim = 0; dim < IVF8_INDEX_DIMS; dim++) {
+        query[dim] = (dim % 2u == 0) ? (int16_t)(-10000 + (int32_t)dim * 1000) :
+                                      (int16_t)(10000 - (int32_t)dim * 700);
+        for (uint32_t lane = 0; lane < IVF8_INDEX_LANES; lane++) {
+            int32_t value = ((int32_t)dim - (int32_t)lane) * 777;
+            if (dim == 3 && lane == 2) {
+                value = -10000;
+            }
+            if (dim == 9 && lane == 6) {
+                value = 10000;
+            }
+            block_data[dim * IVF8_INDEX_LANES + lane] = (int16_t)value;
+        }
+    }
+
+    uint64_t avx2[IVF8_INDEX_LANES];
+    ivf8_block_distances_avx2(block_data, 0, query, avx2);
+    for (uint32_t lane = 0; lane < IVF8_INDEX_LANES; lane++) {
+        CHECK(avx2[lane] == ivf8_block_lane_distance(block_data, 0, lane, query));
+    }
+}
+
 static void test_top5_ordering_and_ties(void) {
     Ivf8Neighbor top[IVF8_SEARCH_TOP_K];
     ivf8_top5_init(top);
@@ -144,6 +184,16 @@ static void test_tiny_search_and_phantom_lanes(void) {
     result = ivf8_search(&tiny.index, query, &cfg);
     CHECK(result.stats.candidates_scanned == 6);
     CHECK(result.fraud_count == 3);
+
+    if (ivf8_cpu_supports_avx2()) {
+        cfg.max_candidates = 8;
+        cfg.impl = IVF8_SEARCH_IMPL_AVX2;
+        Ivf8SearchResult avx2 = ivf8_search(&tiny.index, query, &cfg);
+        cfg.impl = IVF8_SEARCH_IMPL_SCALAR;
+        Ivf8SearchResult scalar = ivf8_search(&tiny.index, query, &cfg);
+        CHECK(avx2.fraud_count == scalar.fraud_count);
+        CHECK(avx2.stats.candidates_scanned == scalar.stats.candidates_scanned);
+    }
 }
 
 static void test_candidate_cap_across_probes(void) {
@@ -158,6 +208,8 @@ static void test_candidate_cap_across_probes(void) {
 
 int main(void) {
     test_distance();
+    test_search_impl_parse_and_detection();
+    test_avx2_block_distances_match_scalar();
     test_top5_ordering_and_ties();
     test_probe_selection();
     test_tiny_search_and_phantom_lanes();

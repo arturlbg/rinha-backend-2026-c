@@ -21,15 +21,20 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: rinha-c-phase7:local
+    image: rinha-c-phase8b:local
     platform: linux/amd64
     user: "0:0"
     environment:
       RINHA_LISTEN_MODE: "fdpass"
       RINHA_UNIX_SOCKET: "/sockets/api1.ctrl"
       RINHA_INDEX_PATH: "/app/resources/index.bin"
+      RINHA_SEARCH_IMPL: "${RINHA_SEARCH_IMPL:-scalar}"
       RINHA_IVF8_MAX_CANDIDATES: "4096"
       RINHA_IVF8_PROBES: "8"
+      RINHA_METRICS_ENABLED: "${RINHA_METRICS_ENABLED:-false}"
+      RINHA_EXEC_MODE: "${RINHA_EXEC_MODE:-per_connection}"
+      RINHA_WORKERS: "${RINHA_WORKERS:-1}"
+      RINHA_FD_QUEUE_SIZE: "${RINHA_FD_QUEUE_SIZE:-1024}"
     volumes:
       - sockets:/sockets
       - ../rinha-2026-go/release:/app/resources:ro
@@ -42,15 +47,20 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: rinha-c-phase7:local
+    image: rinha-c-phase8b:local
     platform: linux/amd64
     user: "0:0"
     environment:
       RINHA_LISTEN_MODE: "fdpass"
       RINHA_UNIX_SOCKET: "/sockets/api2.ctrl"
       RINHA_INDEX_PATH: "/app/resources/index.bin"
+      RINHA_SEARCH_IMPL: "${RINHA_SEARCH_IMPL:-scalar}"
       RINHA_IVF8_MAX_CANDIDATES: "4096"
       RINHA_IVF8_PROBES: "8"
+      RINHA_METRICS_ENABLED: "${RINHA_METRICS_ENABLED:-false}"
+      RINHA_EXEC_MODE: "${RINHA_EXEC_MODE:-per_connection}"
+      RINHA_WORKERS: "${RINHA_WORKERS:-1}"
+      RINHA_FD_QUEUE_SIZE: "${RINHA_FD_QUEUE_SIZE:-1024}"
     volumes:
       - sockets:/sockets
       - ../rinha-2026-go/release:/app/resources:ro

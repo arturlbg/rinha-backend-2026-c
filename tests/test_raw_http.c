@@ -1,12 +1,14 @@
 #include "raw_http.h"
 
 #include "fastvector.h"
+#include "metrics.h"
 #include "responses.h"
 
 #include <errno.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -186,6 +188,11 @@ static void test_request_line(void) {
     CHECK(raw_http_parse_request_line(fraud, strlen(fraud), &line) == 0);
     CHECK(line.method == RAW_HTTP_METHOD_POST);
     CHECK(line.path == RAW_HTTP_PATH_FRAUD_SCORE);
+
+    const char *debug = "GET /debug/info HTTP/1.1\r\n\r\n";
+    CHECK(raw_http_parse_request_line(debug, strlen(debug), &line) == 0);
+    CHECK(line.method == RAW_HTTP_METHOD_GET);
+    CHECK(line.path == RAW_HTTP_PATH_DEBUG_INFO);
 }
 
 static void test_single_request(void) {
@@ -371,6 +378,48 @@ static void test_valid_body_uses_search_response(void) {
     CHECK(contains_text(out, out_len, "{\"approved\":false,\"fraud_score\":0.6}"));
 }
 
+static void test_metrics_counts_and_debug(void) {
+    RinhaMetrics metrics;
+    metrics_init(&metrics, true);
+    raw_http_app app = {
+        .index = (const Ivf8Index *)(const void *)1,
+        .metrics = &metrics,
+        .listen_mode = "tcp",
+        .exec_mode = "per_connection",
+        .workers = 1,
+        .queue_size = 1024,
+    };
+
+    char ready[256];
+    char fraud[256];
+    char debug[256];
+    size_t ready_len = make_request(ready, sizeof(ready), "GET", "/ready", "");
+    size_t fraud_len = make_request(fraud, sizeof(fraud), "POST", "/fraud-score", "{}");
+    size_t debug_len = make_request(debug, sizeof(debug), "GET", "/debug/info", "");
+
+    char combined[768];
+    size_t offset = 0;
+    memcpy(combined + offset, ready, ready_len);
+    offset += ready_len;
+    memcpy(combined + offset, fraud, fraud_len);
+    offset += fraud_len;
+    memcpy(combined + offset, debug, debug_len);
+    offset += debug_len;
+
+    test_chunk chunks[] = {{combined, offset}};
+    char out[8192];
+    size_t out_len = run_connection_with_app(chunks, 1, out, sizeof(out), &app);
+    CHECK(count_responses(out, out_len) == 3);
+    CHECK(contains_text(out, out_len, "metrics_enabled=1"));
+    CHECK(contains_text(out, out_len, "request_count="));
+    CHECK(atomic_load_explicit(&metrics.request_count, memory_order_relaxed) == 3);
+    CHECK(atomic_load_explicit(&metrics.ready_count, memory_order_relaxed) == 1);
+    CHECK(atomic_load_explicit(&metrics.fraud_count, memory_order_relaxed) == 1);
+    CHECK(atomic_load_explicit(&metrics.debug_count, memory_order_relaxed) == 1);
+    CHECK(atomic_load_explicit(&metrics.vectorize_failures, memory_order_relaxed) == 1);
+    CHECK(atomic_load_explicit(&metrics.closed_connections, memory_order_relaxed) == 1);
+}
+
 int main(void) {
     test_header_end();
     test_content_length();
@@ -384,6 +433,7 @@ int main(void) {
     test_fraud_response_mapping();
     test_invalid_body_returns_safe_approved();
     test_valid_body_uses_search_response();
+    test_metrics_counts_and_debug();
 
     if (failures != 0) {
         fprintf(stderr, "%d test failure(s)\n", failures);
