@@ -10,8 +10,11 @@ typedef struct {
 
 extern const http_response RESPONSE_READY;
 extern const http_response RESPONSE_FRAUD_APPROVED;
+extern const http_response RESPONSE_FRAUD[6];
 extern const http_response RESPONSE_NOT_FOUND;
 extern const http_response RESPONSE_METHOD_NOT_ALLOWED;
 extern const http_response RESPONSE_BAD_REQUEST;
+
+const http_response *response_for_fraud_count(unsigned int fraud_count);
 
 #endif

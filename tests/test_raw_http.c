@@ -1,8 +1,12 @@
 #include "raw_http.h"
 
+#include "fastvector.h"
+#include "responses.h"
+
 #include <errno.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -25,11 +29,12 @@ typedef struct {
 
 typedef struct {
     int fd;
+    const raw_http_app *app;
 } server_arg;
 
 static void *server_thread(void *arg) {
     server_arg *server = (server_arg *)arg;
-    (void)raw_http_handle_connection(server->fd);
+    (void)raw_http_handle_connection(server->fd, server->app);
     close(server->fd);
     return NULL;
 }
@@ -56,14 +61,18 @@ static void tiny_pause(void) {
     (void)nanosleep(&ts, NULL);
 }
 
-static size_t run_connection(const test_chunk *chunks, size_t chunk_count, char *out, size_t out_cap) {
+static size_t run_connection_with_app(const test_chunk *chunks,
+                                      size_t chunk_count,
+                                      char *out,
+                                      size_t out_cap,
+                                      const raw_http_app *app) {
     int sockets[2];
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
     if (failures != 0 && sockets[0] < 0) {
         return 0;
     }
 
-    server_arg arg = {.fd = sockets[1]};
+    server_arg arg = {.fd = sockets[1], .app = app};
     pthread_t thread;
     CHECK(pthread_create(&thread, NULL, server_thread, &arg) == 0);
 
@@ -95,6 +104,10 @@ static size_t run_connection(const test_chunk *chunks, size_t chunk_count, char 
     close(sockets[0]);
     CHECK(pthread_join(thread, NULL) == 0);
     return used;
+}
+
+static size_t run_connection(const test_chunk *chunks, size_t chunk_count, char *out, size_t out_cap) {
+    return run_connection_with_app(chunks, chunk_count, out, out_cap, NULL);
 }
 
 static size_t make_request(char *out, size_t cap, const char *method, const char *path, const char *body) {
@@ -272,6 +285,92 @@ static void test_unknown_and_wrong_method(void) {
     CHECK(contains_text(out2, out2_len, "HTTP/1.1 405 Method Not Allowed"));
 }
 
+typedef struct {
+    Ivf8Index index;
+    int16_t centroids[IVF8_INDEX_DIMS];
+    uint32_t offsets[2];
+    uint32_t counts[1];
+    int16_t bbox_min[IVF8_INDEX_DIMS];
+    int16_t bbox_max[IVF8_INDEX_DIMS];
+    uint64_t radii[1];
+    uint8_t labels[IVF8_INDEX_LANES];
+    int16_t block_data[IVF8_INDEX_DIMS * IVF8_INDEX_LANES];
+} FraudPathIndex;
+
+static void make_fraud_path_index(FraudPathIndex *fixture) {
+    memset(fixture, 0, sizeof(*fixture));
+    fixture->index.n = 5;
+    fixture->index.k = 1;
+    fixture->index.dims = IVF8_INDEX_DIMS;
+    fixture->index.lanes = IVF8_INDEX_LANES;
+    fixture->index.blocks = 1;
+    fixture->index.centroids = fixture->centroids;
+    fixture->index.offsets = fixture->offsets;
+    fixture->index.counts = fixture->counts;
+    fixture->index.bbox_min = fixture->bbox_min;
+    fixture->index.bbox_max = fixture->bbox_max;
+    fixture->index.radii = fixture->radii;
+    fixture->index.labels = fixture->labels;
+    fixture->index.block_data = fixture->block_data;
+    fixture->offsets[0] = 0;
+    fixture->offsets[1] = 1;
+    fixture->counts[0] = 5;
+    fixture->labels[0] = 1;
+    fixture->labels[1] = 1;
+    fixture->labels[2] = 1;
+    fixture->labels[3] = 0;
+    fixture->labels[4] = 0;
+    fixture->radii[0] = UINT64_MAX;
+    for (int dim = 0; dim < FASTVECTOR_DIMENSIONS; dim++) {
+        fixture->bbox_min[dim] = -10000;
+        fixture->bbox_max[dim] = 10000;
+    }
+}
+
+static const char *valid_payload(void) {
+    return
+        "{\"id\":\"tx-1\","
+        "\"transaction\":{\"amount\":100,\"installments\":1,\"requested_at\":\"2026-03-16T12:00:00Z\"},"
+        "\"customer\":{\"avg_amount\":100,\"tx_count_24h\":1,\"known_merchants\":[\"M1\"]},"
+        "\"merchant\":{\"id\":\"M1\",\"mcc\":\"5411\",\"avg_amount\":100},"
+        "\"terminal\":{\"is_online\":false,\"card_present\":true,\"km_from_home\":1},"
+        "\"last_transaction\":null}";
+}
+
+static void test_fraud_response_mapping(void) {
+    CHECK(contains_text(RESPONSE_FRAUD[0].data, RESPONSE_FRAUD[0].len, "{\"approved\":true,\"fraud_score\":0}"));
+    CHECK(contains_text(RESPONSE_FRAUD[1].data, RESPONSE_FRAUD[1].len, "{\"approved\":true,\"fraud_score\":0.2}"));
+    CHECK(contains_text(RESPONSE_FRAUD[2].data, RESPONSE_FRAUD[2].len, "{\"approved\":true,\"fraud_score\":0.4}"));
+    CHECK(contains_text(RESPONSE_FRAUD[3].data, RESPONSE_FRAUD[3].len, "{\"approved\":false,\"fraud_score\":0.6}"));
+    CHECK(contains_text(RESPONSE_FRAUD[4].data, RESPONSE_FRAUD[4].len, "{\"approved\":false,\"fraud_score\":0.8}"));
+    CHECK(contains_text(RESPONSE_FRAUD[5].data, RESPONSE_FRAUD[5].len, "{\"approved\":false,\"fraud_score\":1}"));
+}
+
+static void test_invalid_body_returns_safe_approved(void) {
+    char req[256];
+    size_t req_len = make_request(req, sizeof(req), "POST", "/fraud-score", "{}");
+    raw_http_app app = {.index = (const Ivf8Index *)(const void *)1};
+    test_chunk chunks[] = {{req, req_len}};
+    char out[1024];
+    size_t out_len = run_connection_with_app(chunks, 1, out, sizeof(out), &app);
+    CHECK(contains_text(out, out_len, "{\"approved\":true,\"fraud_score\":0}"));
+}
+
+static void test_valid_body_uses_search_response(void) {
+    FraudPathIndex fixture;
+    make_fraud_path_index(&fixture);
+    raw_http_app app = {
+        .index = &fixture.index,
+        .search_config = {.max_candidates = 5, .probes = 1},
+    };
+    char req[1024];
+    size_t req_len = make_request(req, sizeof(req), "POST", "/fraud-score", valid_payload());
+    test_chunk chunks[] = {{req, req_len}};
+    char out[2048];
+    size_t out_len = run_connection_with_app(chunks, 1, out, sizeof(out), &app);
+    CHECK(contains_text(out, out_len, "{\"approved\":false,\"fraud_score\":0.6}"));
+}
+
 int main(void) {
     test_header_end();
     test_content_length();
@@ -282,6 +381,9 @@ int main(void) {
     test_fragmented_body();
     test_mixed_pipeline_fragment();
     test_unknown_and_wrong_method();
+    test_fraud_response_mapping();
+    test_invalid_body_returns_safe_approved();
+    test_valid_body_uses_search_response();
 
     if (failures != 0) {
         fprintf(stderr, "%d test failure(s)\n", failures);

@@ -5,6 +5,9 @@
 #include <stddef.h>
 #include <sys/types.h>
 
+#include "ivf8_index.h"
+#include "ivf8_search.h"
+
 typedef enum {
     RAW_HTTP_METHOD_OTHER = 0,
     RAW_HTTP_METHOD_GET = 1,
@@ -22,8 +25,13 @@ typedef struct {
     raw_http_path path;
 } raw_http_request_line;
 
-int raw_http_serve(const char *addr);
-int raw_http_handle_connection(int client_fd);
+typedef struct {
+    const Ivf8Index *index;
+    Ivf8SearchConfig search_config;
+} raw_http_app;
+
+int raw_http_serve(const char *addr, const raw_http_app *app);
+int raw_http_handle_connection(int client_fd, const raw_http_app *app);
 
 ssize_t raw_http_index_header_end(const char *buffer, size_t len);
 int raw_http_parse_content_length(const char *header, size_t len, size_t *content_length, bool *present);

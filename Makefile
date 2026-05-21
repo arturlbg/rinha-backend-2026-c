@@ -5,10 +5,10 @@ LDFLAGS ?=
 
 BUILD_DIR := build
 TARGET := $(BUILD_DIR)/rinha-api
-SOURCES := src/main.c src/raw_http.c src/responses.c src/fastvector.c
+SOURCES := src/main.c src/raw_http.c src/responses.c src/fastvector.c src/ivf8_index.c src/ivf8_search.c
 OBJECTS := $(SOURCES:%.c=$(BUILD_DIR)/%.o)
 RAW_HTTP_TEST_TARGET := $(BUILD_DIR)/test_raw_http
-RAW_HTTP_TEST_SOURCES := tests/test_raw_http.c src/raw_http.c src/responses.c
+RAW_HTTP_TEST_SOURCES := tests/test_raw_http.c src/raw_http.c src/responses.c src/fastvector.c src/ivf8_search.c
 FASTVECTOR_TEST_TARGET := $(BUILD_DIR)/test_fastvector
 FASTVECTOR_TEST_SOURCES := tests/test_fastvector.c src/fastvector.c
 IVF8_INDEX_TEST_TARGET := $(BUILD_DIR)/test_ivf8_index
@@ -27,7 +27,7 @@ EVALUATE_C_SOURCES := tools/evaluate_c.c src/fastvector.c src/ivf8_index.c src/i
 all: $(TARGET)
 
 $(TARGET): $(OBJECTS)
-	$(CC) $(OBJECTS) $(LDFLAGS) -o $@
+	$(CC) $(OBJECTS) -pthread $(LDFLAGS) -o $@
 
 $(BUILD_DIR)/%.o: %.c
 	mkdir -p $(dir $@)

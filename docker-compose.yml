@@ -1,0 +1,56 @@
+services:
+  nginx:
+    image: nginx:1.25-alpine
+    platform: linux/amd64
+    ports:
+      - "9999:9999"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api1
+      - api2
+    cpus: "0.10"
+    mem_limit: 16m
+    networks:
+      - rinha
+
+  api1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rinha-c-phase6:local
+    platform: linux/amd64
+    environment:
+      RINHA_ADDR: ":8080"
+      RINHA_INDEX_PATH: "/app/resources/index.bin"
+      RINHA_IVF8_MAX_CANDIDATES: "4096"
+      RINHA_IVF8_PROBES: "8"
+    volumes:
+      - ../rinha-2026-go/release:/app/resources:ro
+    cpus: "0.45"
+    mem_limit: 167m
+    networks:
+      - rinha
+
+  api2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rinha-c-phase6:local
+    platform: linux/amd64
+    environment:
+      RINHA_ADDR: ":8080"
+      RINHA_INDEX_PATH: "/app/resources/index.bin"
+      RINHA_IVF8_MAX_CANDIDATES: "4096"
+      RINHA_IVF8_PROBES: "8"
+    volumes:
+      - ../rinha-2026-go/release:/app/resources:ro
+    cpus: "0.45"
+    mem_limit: 167m
+    networks:
+      - rinha
+
+networks:
+  rinha:
+    driver: bridge
+

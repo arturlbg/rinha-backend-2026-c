@@ -3,12 +3,14 @@
 #include "raw_http.h"
 
 #include "config.h"
+#include "fastvector.h"
 #include "responses.h"
 
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -23,6 +25,11 @@ typedef struct {
     size_t content_length;
     bool content_length_present;
 } parsed_request;
+
+typedef struct {
+    int client_fd;
+    const raw_http_app *app;
+} connection_arg;
 
 static int parse_port(const char *addr) {
     const char *port_text = addr;
@@ -198,7 +205,7 @@ static int parse_request_header(const char *header, size_t len, parsed_request *
     return 0;
 }
 
-static const http_response *route_request(const parsed_request *request) {
+static const http_response *route_request(const parsed_request *request, const char *body, const raw_http_app *app) {
     if (request->path == RAW_HTTP_PATH_READY) {
         return request->method == RAW_HTTP_METHOD_GET ? &RESPONSE_READY : &RESPONSE_METHOD_NOT_ALLOWED;
     }
@@ -209,7 +216,15 @@ static const http_response *route_request(const parsed_request *request) {
         if (!request->content_length_present) {
             return &RESPONSE_BAD_REQUEST;
         }
-        return &RESPONSE_FRAUD_APPROVED;
+        if (app == NULL || app->index == NULL || body == NULL) {
+            return &RESPONSE_FRAUD_APPROVED;
+        }
+        int16_t query[FASTVECTOR_DIMENSIONS];
+        if (!fastvector_vectorize(body, request->content_length, query)) {
+            return &RESPONSE_FRAUD_APPROVED;
+        }
+        uint8_t fraud_count = ivf8_search_fraud_count(app->index, query, &app->search_config);
+        return response_for_fraud_count(fraud_count);
     }
     return &RESPONSE_NOT_FOUND;
 }
@@ -266,7 +281,7 @@ static bool compact_or_expand_buffer(char *buffer, size_t *used, size_t *pos, si
     return false;
 }
 
-int raw_http_handle_connection(int client_fd) {
+int raw_http_handle_connection(int client_fd, const raw_http_app *app) {
     char buffer[RINHA_MAX_REQUEST_BYTES];
     size_t used = 0;
     size_t pos = 0;
@@ -352,7 +367,8 @@ int raw_http_handle_connection(int client_fd) {
             return -1;
         }
 
-        const http_response *response = route_request(&request);
+        const char *body = buffer + header_end;
+        const http_response *response = route_request(&request, body, app);
         if (write_all(client_fd, response->data, response->len) != 0) {
             return -1;
         }
@@ -366,7 +382,17 @@ int raw_http_handle_connection(int client_fd) {
     }
 }
 
-int raw_http_serve(const char *addr) {
+static void *connection_thread(void *arg) {
+    connection_arg *conn = (connection_arg *)arg;
+    int client_fd = conn->client_fd;
+    const raw_http_app *app = conn->app;
+    free(conn);
+    (void)raw_http_handle_connection(client_fd, app);
+    close(client_fd);
+    return NULL;
+}
+
+int raw_http_serve(const char *addr, const raw_http_app *app) {
     int port = parse_port(addr);
     if (port < 0) {
         errno = EINVAL;
@@ -405,7 +431,20 @@ int raw_http_serve(const char *addr) {
             close(server_fd);
             return -1;
         }
-        (void)raw_http_handle_connection(client_fd);
-        close(client_fd);
+
+        connection_arg *arg = (connection_arg *)malloc(sizeof(*arg));
+        if (arg == NULL) {
+            close(client_fd);
+            continue;
+        }
+        arg->client_fd = client_fd;
+        arg->app = app;
+        pthread_t thread;
+        if (pthread_create(&thread, NULL, connection_thread, arg) != 0) {
+            free(arg);
+            close(client_fd);
+            continue;
+        }
+        (void)pthread_detach(thread);
     }
 }
