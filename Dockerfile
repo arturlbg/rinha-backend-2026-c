@@ -12,6 +12,7 @@ RUN make clean && make
 
 FROM build AS test
 RUN make test
+CMD ["make", "test"]
 
 FROM debian:bookworm-slim AS runtime
 WORKDIR /app
