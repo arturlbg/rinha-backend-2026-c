@@ -1,0 +1,67 @@
+services:
+  lb:
+    image: ghcr.io/arturlbg/rinha-backend-2026-go:fdlb
+    platform: linux/amd64
+    ports:
+      - "9999:9999"
+    environment:
+      RINHA_LB_ADDR: ":9999"
+      RINHA_FDPASS_UPSTREAMS: "/sockets/api1.ctrl,/sockets/api2.ctrl"
+    volumes:
+      - sockets:/sockets
+    depends_on:
+      - api1
+      - api2
+    cpus: "0.05"
+    mem_limit: 16m
+    networks:
+      - rinha
+
+  api1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rinha-c-phase7:local
+    platform: linux/amd64
+    user: "0:0"
+    environment:
+      RINHA_LISTEN_MODE: "fdpass"
+      RINHA_UNIX_SOCKET: "/sockets/api1.ctrl"
+      RINHA_INDEX_PATH: "/app/resources/index.bin"
+      RINHA_IVF8_MAX_CANDIDATES: "4096"
+      RINHA_IVF8_PROBES: "8"
+    volumes:
+      - sockets:/sockets
+      - ../rinha-2026-go/release:/app/resources:ro
+    cpus: "0.475"
+    mem_limit: 167m
+    networks:
+      - rinha
+
+  api2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rinha-c-phase7:local
+    platform: linux/amd64
+    user: "0:0"
+    environment:
+      RINHA_LISTEN_MODE: "fdpass"
+      RINHA_UNIX_SOCKET: "/sockets/api2.ctrl"
+      RINHA_INDEX_PATH: "/app/resources/index.bin"
+      RINHA_IVF8_MAX_CANDIDATES: "4096"
+      RINHA_IVF8_PROBES: "8"
+    volumes:
+      - sockets:/sockets
+      - ../rinha-2026-go/release:/app/resources:ro
+    cpus: "0.475"
+    mem_limit: 167m
+    networks:
+      - rinha
+
+volumes:
+  sockets:
+
+networks:
+  rinha:
+    driver: bridge

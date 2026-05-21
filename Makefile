@@ -5,7 +5,7 @@ LDFLAGS ?=
 
 BUILD_DIR := build
 TARGET := $(BUILD_DIR)/rinha-api
-SOURCES := src/main.c src/raw_http.c src/responses.c src/fastvector.c src/ivf8_index.c src/ivf8_search.c
+SOURCES := src/main.c src/raw_http.c src/responses.c src/fastvector.c src/ivf8_index.c src/ivf8_search.c src/fdpass.c
 OBJECTS := $(SOURCES:%.c=$(BUILD_DIR)/%.o)
 RAW_HTTP_TEST_TARGET := $(BUILD_DIR)/test_raw_http
 RAW_HTTP_TEST_SOURCES := tests/test_raw_http.c src/raw_http.c src/responses.c src/fastvector.c src/ivf8_search.c
@@ -15,6 +15,8 @@ IVF8_INDEX_TEST_TARGET := $(BUILD_DIR)/test_ivf8_index
 IVF8_INDEX_TEST_SOURCES := tests/test_ivf8_index.c src/ivf8_index.c
 IVF8_SEARCH_TEST_TARGET := $(BUILD_DIR)/test_ivf8_search
 IVF8_SEARCH_TEST_SOURCES := tests/test_ivf8_search.c src/ivf8_search.c
+FDPASS_TEST_TARGET := $(BUILD_DIR)/test_fdpass
+FDPASS_TEST_SOURCES := tests/test_fdpass.c src/fdpass.c src/raw_http.c src/responses.c src/fastvector.c src/ivf8_search.c
 VECTORIZE_C_TARGET := $(BUILD_DIR)/vectorize_c
 VECTORIZE_C_SOURCES := tools/vectorize_c.c src/fastvector.c
 INSPECT_INDEX_TARGET := $(BUILD_DIR)/inspect_index
@@ -49,6 +51,10 @@ $(IVF8_SEARCH_TEST_TARGET): $(IVF8_SEARCH_TEST_SOURCES)
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(IVF8_SEARCH_TEST_SOURCES) -o $@
 
+$(FDPASS_TEST_TARGET): $(FDPASS_TEST_SOURCES)
+	mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $(FDPASS_TEST_SOURCES) -o $@
+
 $(VECTORIZE_C_TARGET): $(VECTORIZE_C_SOURCES)
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(VECTORIZE_C_SOURCES) -o $@
@@ -63,11 +69,12 @@ $(EVALUATE_C_TARGET): $(EVALUATE_C_SOURCES)
 
 tools: $(VECTORIZE_C_TARGET) $(INSPECT_INDEX_TARGET) $(EVALUATE_C_TARGET)
 
-test: $(RAW_HTTP_TEST_TARGET) $(FASTVECTOR_TEST_TARGET) $(IVF8_INDEX_TEST_TARGET) $(IVF8_SEARCH_TEST_TARGET) tools
+test: $(RAW_HTTP_TEST_TARGET) $(FASTVECTOR_TEST_TARGET) $(IVF8_INDEX_TEST_TARGET) $(IVF8_SEARCH_TEST_TARGET) $(FDPASS_TEST_TARGET) tools
 	./$(RAW_HTTP_TEST_TARGET)
 	./$(FASTVECTOR_TEST_TARGET)
 	./$(IVF8_INDEX_TEST_TARGET)
 	./$(IVF8_SEARCH_TEST_TARGET)
+	./$(FDPASS_TEST_TARGET)
 
 clean:
 	rm -rf $(BUILD_DIR)

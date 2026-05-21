@@ -2,6 +2,8 @@
 #define RINHA_CONFIG_H
 
 #define RINHA_DEFAULT_ADDR ":8080"
+#define RINHA_DEFAULT_LISTEN_MODE "tcp"
+#define RINHA_DEFAULT_UNIX_SOCKET "/sockets/api.ctrl"
 #define RINHA_DEFAULT_INDEX_PATH "/app/resources/index.bin"
 #define RINHA_DEFAULT_IVF8_MAX_CANDIDATES 4096u
 #define RINHA_DEFAULT_IVF8_PROBES 8u
