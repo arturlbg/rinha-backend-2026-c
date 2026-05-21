@@ -7,6 +7,7 @@ COPY Makefile ./
 COPY include ./include
 COPY src ./src
 COPY tests ./tests
+COPY tools ./tools
 
 RUN make clean && make
 
