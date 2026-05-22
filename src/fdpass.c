@@ -13,8 +13,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -35,6 +37,8 @@ typedef struct fdpass_runtime {
     fdpass_options options;
     FdQueue queue;
     bool queue_ready;
+    int epoll_fd;
+    bool epoll_ready;
 } fdpass_runtime;
 
 static int mkdir_parent(const char *path) {
@@ -58,10 +62,14 @@ static int mkdir_parent(const char *path) {
     return 0;
 }
 
-static void tune_client_fd(int fd) {
+static void tune_client_fd(int fd, bool nonblocking) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags >= 0) {
-        (void)fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+        if (nonblocking) {
+            (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        } else {
+            (void)fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+        }
     }
 
     int enabled = 1;
@@ -167,7 +175,7 @@ static void *fdpass_client_thread(void *arg) {
     const raw_http_app *app = client->app;
     free(client);
 
-    tune_client_fd(client_fd);
+    tune_client_fd(client_fd, false);
     (void)raw_http_handle_connection(client_fd, app);
     close(client_fd);
     return NULL;
@@ -200,7 +208,7 @@ static void start_client_thread(int client_fd, const raw_http_app *app) {
 }
 
 static void handle_client_fd(int client_fd, const raw_http_app *app) {
-    tune_client_fd(client_fd);
+    tune_client_fd(client_fd, false);
     (void)raw_http_handle_connection(client_fd, app);
     close(client_fd);
 }
@@ -237,10 +245,152 @@ static int start_worker_threads(fdpass_runtime *runtime) {
     return 0;
 }
 
+static void epoll_note_open(RinhaMetrics *metrics) {
+    if (metrics == NULL) {
+        return;
+    }
+    metrics_inc(&metrics->epoll_registered_connections);
+    metrics_inc(&metrics->epoll_open_connections);
+    uint64_t open = atomic_load_explicit(&metrics->epoll_open_connections, memory_order_relaxed);
+    metrics_update_max(&metrics->epoll_max_open_connections, open);
+}
+
+static void epoll_note_close(RinhaMetrics *metrics) {
+    if (metrics == NULL) {
+        return;
+    }
+    metrics_inc(&metrics->epoll_closed_connections);
+    metrics_dec(&metrics->epoll_open_connections);
+}
+
+static void close_epoll_conn(fdpass_runtime *runtime, raw_http_conn *conn) {
+    if (conn == NULL) {
+        return;
+    }
+    if (runtime->epoll_fd >= 0 && conn->fd >= 0) {
+        (void)epoll_ctl(runtime->epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
+    }
+    raw_http_conn_close(conn);
+    epoll_note_close(runtime_metrics(runtime));
+    free(conn);
+}
+
+static int update_epoll_interest(fdpass_runtime *runtime, raw_http_conn *conn) {
+    struct epoll_event event;
+    memset(&event, 0, sizeof(event));
+    event.events = EPOLLIN | EPOLLRDHUP | EPOLLERR | EPOLLHUP;
+    if (raw_http_conn_wants_write(conn)) {
+        event.events |= EPOLLOUT;
+    }
+    event.data.ptr = conn;
+    return epoll_ctl(runtime->epoll_fd, EPOLL_CTL_MOD, conn->fd, &event);
+}
+
+static void *fdpass_epoll_thread(void *arg) {
+    fdpass_runtime *runtime = (fdpass_runtime *)arg;
+    RinhaMetrics *metrics = runtime_metrics(runtime);
+    struct epoll_event events[128];
+
+    for (;;) {
+        int n = epoll_wait(runtime->epoll_fd, events, (int)(sizeof(events) / sizeof(events[0])), -1);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+
+        for (int i = 0; i < n; i++) {
+            raw_http_conn *conn = (raw_http_conn *)events[i].data.ptr;
+            if (conn == NULL || conn->closed) {
+                continue;
+            }
+
+            uint32_t status = RAW_HTTP_CONN_WANT_READ;
+            if ((events[i].events & (EPOLLERR | EPOLLHUP)) != 0) {
+                close_epoll_conn(runtime, conn);
+                continue;
+            }
+            if ((events[i].events & EPOLLIN) != 0) {
+                if (metrics != NULL) {
+                    metrics_inc(&metrics->epoll_read_events);
+                }
+                status = raw_http_conn_on_readable(conn);
+            }
+            if (status != RAW_HTTP_CONN_CLOSED &&
+                (events[i].events & EPOLLOUT) != 0 &&
+                raw_http_conn_wants_write(conn)) {
+                if (metrics != NULL) {
+                    metrics_inc(&metrics->epoll_write_events);
+                }
+                status = raw_http_conn_on_writable(conn);
+            }
+
+            if (status == RAW_HTTP_CONN_CLOSED || conn->closed) {
+                close_epoll_conn(runtime, conn);
+                continue;
+            }
+            if ((events[i].events & EPOLLRDHUP) != 0 && !raw_http_conn_wants_write(conn)) {
+                close_epoll_conn(runtime, conn);
+                continue;
+            }
+            if (update_epoll_interest(runtime, conn) != 0) {
+                close_epoll_conn(runtime, conn);
+            }
+        }
+    }
+    return NULL;
+}
+
+static int start_epoll_thread(fdpass_runtime *runtime) {
+    runtime->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+    if (runtime->epoll_fd < 0) {
+        return -1;
+    }
+    runtime->epoll_ready = true;
+
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, fdpass_epoll_thread, runtime) != 0) {
+        close(runtime->epoll_fd);
+        runtime->epoll_fd = -1;
+        runtime->epoll_ready = false;
+        return -1;
+    }
+    (void)pthread_detach(thread);
+    return 0;
+}
+
+static void dispatch_epoll_client_fd(fdpass_runtime *runtime, int client_fd) {
+    tune_client_fd(client_fd, true);
+
+    raw_http_conn *conn = (raw_http_conn *)malloc(sizeof(*conn));
+    if (conn == NULL) {
+        close(client_fd);
+        return;
+    }
+    raw_http_conn_init(conn, client_fd, runtime->app);
+
+    struct epoll_event event;
+    memset(&event, 0, sizeof(event));
+    event.events = EPOLLIN | EPOLLRDHUP | EPOLLERR | EPOLLHUP;
+    event.data.ptr = conn;
+    if (epoll_ctl(runtime->epoll_fd, EPOLL_CTL_ADD, client_fd, &event) != 0) {
+        raw_http_conn_close(conn);
+        free(conn);
+        return;
+    }
+    epoll_note_open(runtime_metrics(runtime));
+}
+
 static void dispatch_client_fd(fdpass_runtime *runtime, int client_fd) {
     RinhaMetrics *metrics = runtime_metrics(runtime);
     if (metrics != NULL) {
         metrics_inc(&metrics->adopted_fds);
+    }
+
+    if (runtime->options.exec_mode == FDPASS_EXEC_EPOLL) {
+        dispatch_epoll_client_fd(runtime, client_fd);
+        return;
     }
 
     if (runtime->options.exec_mode == FDPASS_EXEC_WORKER_POOL) {
@@ -339,22 +489,37 @@ int fdpass_serve(const char *control_path, const raw_http_app *app, const fdpass
 
     fdpass_runtime runtime;
     memset(&runtime, 0, sizeof(runtime));
+    runtime.epoll_fd = -1;
     runtime.app = app;
     runtime.options = normalize_options(options);
+    if (runtime.options.exec_mode == FDPASS_EXEC_EPOLL) {
+        if (start_epoll_thread(&runtime) != 0) {
+            return -1;
+        }
+    }
     if (runtime.options.exec_mode == FDPASS_EXEC_WORKER_POOL) {
         if (fd_queue_init(&runtime.queue, runtime.options.queue_size) != 0) {
+            if (runtime.epoll_ready) {
+                close(runtime.epoll_fd);
+            }
             return -1;
         }
         runtime.queue_ready = true;
         if (start_worker_threads(&runtime) != 0) {
             fd_queue_close(&runtime.queue);
             fd_queue_destroy(&runtime.queue);
+            if (runtime.epoll_ready) {
+                close(runtime.epoll_fd);
+            }
             return -1;
         }
     }
 
     int server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (server_fd < 0) {
+        if (runtime.epoll_ready) {
+            close(runtime.epoll_fd);
+        }
         if (runtime.queue_ready) {
             fd_queue_close(&runtime.queue);
             fd_queue_destroy(&runtime.queue);
@@ -370,6 +535,9 @@ int fdpass_serve(const char *control_path, const raw_http_app *app, const fdpass
     (void)unlink(control_path);
     if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         close(server_fd);
+        if (runtime.epoll_ready) {
+            close(runtime.epoll_fd);
+        }
         if (runtime.queue_ready) {
             fd_queue_close(&runtime.queue);
             fd_queue_destroy(&runtime.queue);
@@ -381,6 +549,9 @@ int fdpass_serve(const char *control_path, const raw_http_app *app, const fdpass
     if (listen(server_fd, RINHA_LISTEN_BACKLOG) != 0) {
         close(server_fd);
         (void)unlink(control_path);
+        if (runtime.epoll_ready) {
+            close(runtime.epoll_fd);
+        }
         if (runtime.queue_ready) {
             fd_queue_close(&runtime.queue);
             fd_queue_destroy(&runtime.queue);
@@ -398,6 +569,9 @@ int fdpass_serve(const char *control_path, const raw_http_app *app, const fdpass
             if (runtime.queue_ready) {
                 fd_queue_close(&runtime.queue);
                 fd_queue_destroy(&runtime.queue);
+            }
+            if (runtime.epoll_ready) {
+                close(runtime.epoll_fd);
             }
             return -1;
         }

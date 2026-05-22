@@ -3,11 +3,18 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <sys/types.h>
 
+#include "config.h"
 #include "ivf8_index.h"
 #include "ivf8_search.h"
 #include "metrics.h"
+
+#define RAW_HTTP_CONN_WANT_READ 1u
+#define RAW_HTTP_CONN_WANT_WRITE 2u
+#define RAW_HTTP_CONN_CLOSED 4u
+#define RAW_HTTP_DEBUG_RESPONSE_BYTES 12288u
 
 typedef enum {
     RAW_HTTP_METHOD_OTHER = 0,
@@ -37,8 +44,30 @@ typedef struct {
     uint32_t queue_size;
 } raw_http_app;
 
+typedef struct {
+    int fd;
+    const raw_http_app *app;
+    char buffer[RINHA_MAX_REQUEST_BYTES];
+    size_t used;
+    size_t pos;
+    const char *out_data;
+    size_t out_len;
+    size_t out_pos;
+    char dynamic_response[RAW_HTTP_DEBUG_RESPONSE_BYTES];
+    bool close_after_write;
+    bool closed;
+    uint64_t connection_start_ns;
+    uint64_t request_start_ns;
+    uint64_t write_start_ns;
+} raw_http_conn;
+
 int raw_http_serve(const char *addr, const raw_http_app *app);
 int raw_http_handle_connection(int client_fd, const raw_http_app *app);
+void raw_http_conn_init(raw_http_conn *conn, int client_fd, const raw_http_app *app);
+uint32_t raw_http_conn_on_readable(raw_http_conn *conn);
+uint32_t raw_http_conn_on_writable(raw_http_conn *conn);
+bool raw_http_conn_wants_write(const raw_http_conn *conn);
+void raw_http_conn_close(raw_http_conn *conn);
 
 ssize_t raw_http_index_header_end(const char *buffer, size_t len);
 int raw_http_parse_content_length(const char *header, size_t len, size_t *content_length, bool *present);

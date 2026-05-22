@@ -75,6 +75,21 @@ void metrics_inc(atomic_uint_fast64_t *counter) {
     atomic_fetch_add_explicit(counter, 1u, memory_order_relaxed);
 }
 
+void metrics_dec(atomic_uint_fast64_t *counter) {
+    atomic_fetch_sub_explicit(counter, 1u, memory_order_relaxed);
+}
+
+void metrics_update_max(atomic_uint_fast64_t *counter, uint64_t value) {
+    uint_fast64_t current = atomic_load_explicit(counter, memory_order_relaxed);
+    while (current < value &&
+           !atomic_compare_exchange_weak_explicit(counter,
+                                                  &current,
+                                                  value,
+                                                  memory_order_relaxed,
+                                                  memory_order_relaxed)) {
+    }
+}
+
 void metrics_observe(RinhaMetricHistogram *histogram, uint64_t ns) {
     uint32_t bucket = RINHA_METRIC_BUCKETS - 1u;
     for (uint32_t i = 0; i < RINHA_METRIC_BUCKETS - 1u; i++) {
@@ -164,6 +179,14 @@ size_t metrics_write_text(const RinhaMetrics *metrics,
     used = appendf(out, cap, used, "fd_queue_enqueued=%llu\n", (unsigned long long)load_counter(&metrics->fd_queue_enqueued));
     used = appendf(out, cap, used, "fd_queue_dequeued=%llu\n", (unsigned long long)load_counter(&metrics->fd_queue_dequeued));
     used = appendf(out, cap, used, "fd_queue_dropped=%llu\n", (unsigned long long)load_counter(&metrics->fd_queue_dropped));
+    used = appendf(out, cap, used, "epoll_registered_connections=%llu\n", (unsigned long long)load_counter(&metrics->epoll_registered_connections));
+    used = appendf(out, cap, used, "epoll_closed_connections=%llu\n", (unsigned long long)load_counter(&metrics->epoll_closed_connections));
+    used = appendf(out, cap, used, "epoll_read_events=%llu\n", (unsigned long long)load_counter(&metrics->epoll_read_events));
+    used = appendf(out, cap, used, "epoll_write_events=%llu\n", (unsigned long long)load_counter(&metrics->epoll_write_events));
+    used = appendf(out, cap, used, "epoll_partial_writes=%llu\n", (unsigned long long)load_counter(&metrics->epoll_partial_writes));
+    used = appendf(out, cap, used, "epoll_parser_errors=%llu\n", (unsigned long long)load_counter(&metrics->epoll_parser_errors));
+    used = appendf(out, cap, used, "epoll_open_connections=%llu\n", (unsigned long long)load_counter(&metrics->epoll_open_connections));
+    used = appendf(out, cap, used, "epoll_max_open_connections=%llu\n", (unsigned long long)load_counter(&metrics->epoll_max_open_connections));
 
     used = append_histogram(out, cap, used, "request_total", &metrics->request_total);
     used = append_histogram(out, cap, used, "vectorize", &metrics->vectorize);

@@ -282,6 +282,64 @@ static int write_all(int fd, const char *data, size_t len, RinhaMetrics *metrics
     return 0;
 }
 
+static size_t build_debug_response(const raw_http_app *app,
+                                   RinhaMetrics *metrics,
+                                   char *out,
+                                   size_t cap) {
+    if (metrics == NULL || out == NULL || cap < 256) {
+        return 0;
+    }
+
+    const size_t body_offset = 192;
+    size_t body_len = metrics_write_text(metrics,
+                                         out + body_offset,
+                                         cap - body_offset,
+                                         app == NULL ? "" : app->listen_mode,
+                                         app == NULL ? "" : app->exec_mode,
+                                         app == NULL ? 0u : app->workers,
+                                         app == NULL ? 0u : app->queue_size);
+    int header_len = snprintf(out,
+                              body_offset,
+                              "HTTP/1.1 200 OK\r\n"
+                              "Content-Type: text/plain\r\n"
+                              "Content-Length: %zu\r\n"
+                              "\r\n",
+                              body_len);
+    if (header_len <= 0 || (size_t)header_len >= body_offset) {
+        return 0;
+    }
+    memmove(out + (size_t)header_len, out + body_offset, body_len);
+    return (size_t)header_len + body_len;
+}
+
+static void prepare_response(const parsed_request *request,
+                             const char *body,
+                             const raw_http_app *app,
+                             char *dynamic_response,
+                             size_t dynamic_response_cap,
+                             const char **out_data,
+                             size_t *out_len) {
+    RinhaMetrics *metrics = app_metrics(app);
+    if (request->path == RAW_HTTP_PATH_DEBUG_INFO &&
+        request->method == RAW_HTTP_METHOD_GET &&
+        metrics != NULL) {
+        metrics_inc(&metrics->debug_count);
+        size_t response_len = build_debug_response(app, metrics, dynamic_response, dynamic_response_cap);
+        if (response_len > 0) {
+            *out_data = dynamic_response;
+            *out_len = response_len;
+            return;
+        }
+        *out_data = RESPONSE_BAD_REQUEST.data;
+        *out_len = RESPONSE_BAD_REQUEST.len;
+        return;
+    }
+
+    const http_response *response = route_request(request, body, app);
+    *out_data = response->data;
+    *out_len = response->len;
+}
+
 static bool compact_or_expand_buffer(char *buffer, size_t *used, size_t *pos, size_t *capacity, size_t needed) {
     if (needed <= *capacity && *used < *capacity) {
         return true;
@@ -321,29 +379,12 @@ static int write_debug_response(int client_fd, const raw_http_app *app, RinhaMet
         return write_all(client_fd, RESPONSE_NOT_FOUND.data, RESPONSE_NOT_FOUND.len, NULL);
     }
 
-    char body[8192];
-    size_t body_len = metrics_write_text(metrics,
-                                         body,
-                                         sizeof(body),
-                                         app == NULL ? "" : app->listen_mode,
-                                         app == NULL ? "" : app->exec_mode,
-                                         app == NULL ? 0u : app->workers,
-                                         app == NULL ? 0u : app->queue_size);
-    char header[160];
-    int header_len = snprintf(header,
-                              sizeof(header),
-                              "HTTP/1.1 200 OK\r\n"
-                              "Content-Type: text/plain\r\n"
-                              "Content-Length: %zu\r\n"
-                              "\r\n",
-                              body_len);
-    if (header_len <= 0 || (size_t)header_len >= sizeof(header)) {
+    char response[RAW_HTTP_DEBUG_RESPONSE_BYTES];
+    size_t response_len = build_debug_response(app, metrics, response, sizeof(response));
+    if (response_len == 0) {
         return -1;
     }
-    if (write_all(client_fd, header, (size_t)header_len, metrics) != 0) {
-        return -1;
-    }
-    return write_all(client_fd, body, body_len, metrics);
+    return write_all(client_fd, response, response_len, metrics);
 }
 
 static int raw_http_handle_connection_loop(int client_fd, const raw_http_app *app) {
@@ -502,6 +543,278 @@ int raw_http_handle_connection(int client_fd, const raw_http_app *app) {
         metrics_observe(&metrics->connection_lifetime, metrics_now_ns() - start);
     }
     return result;
+}
+
+static void raw_http_conn_compact(raw_http_conn *conn) {
+    if (conn->pos == 0) {
+        return;
+    }
+    if (conn->pos == conn->used) {
+        conn->pos = 0;
+        conn->used = 0;
+        return;
+    }
+    memmove(conn->buffer, conn->buffer + conn->pos, conn->used - conn->pos);
+    conn->used -= conn->pos;
+    conn->pos = 0;
+}
+
+void raw_http_conn_init(raw_http_conn *conn, int client_fd, const raw_http_app *app) {
+    memset(conn, 0, sizeof(*conn));
+    conn->fd = client_fd;
+    conn->app = app;
+    RinhaMetrics *metrics = app_metrics(app);
+    conn->connection_start_ns = metrics != NULL ? metrics_now_ns() : 0u;
+}
+
+bool raw_http_conn_wants_write(const raw_http_conn *conn) {
+    return conn != NULL && !conn->closed && conn->out_data != NULL && conn->out_pos < conn->out_len;
+}
+
+void raw_http_conn_close(raw_http_conn *conn) {
+    if (conn == NULL || conn->closed) {
+        return;
+    }
+    RinhaMetrics *metrics = app_metrics(conn->app);
+    if (conn->fd >= 0) {
+        close(conn->fd);
+        conn->fd = -1;
+    }
+    conn->closed = true;
+    if (metrics != NULL) {
+        metrics_inc(&metrics->closed_connections);
+        metrics_observe(&metrics->connection_lifetime, metrics_now_ns() - conn->connection_start_ns);
+    }
+}
+
+static void raw_http_conn_set_static_response(raw_http_conn *conn,
+                                              const http_response *response,
+                                              bool close_after_write) {
+    conn->out_data = response->data;
+    conn->out_len = response->len;
+    conn->out_pos = 0;
+    conn->close_after_write = close_after_write;
+    RinhaMetrics *metrics = app_metrics(conn->app);
+    if (metrics != NULL && conn->request_start_ns == 0) {
+        conn->request_start_ns = metrics_now_ns();
+    }
+    conn->write_start_ns = metrics != NULL ? metrics_now_ns() : 0u;
+}
+
+static uint32_t raw_http_conn_flush(raw_http_conn *conn) {
+    RinhaMetrics *metrics = app_metrics(conn->app);
+    while (raw_http_conn_wants_write(conn)) {
+        ssize_t n = send(conn->fd,
+                         conn->out_data + conn->out_pos,
+                         conn->out_len - conn->out_pos,
+                         MSG_NOSIGNAL);
+        if (n > 0) {
+            conn->out_pos += (size_t)n;
+            continue;
+        }
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (metrics != NULL) {
+                metrics_inc(&metrics->epoll_partial_writes);
+            }
+            return RAW_HTTP_CONN_WANT_WRITE;
+        }
+        if (metrics != NULL) {
+            metrics_inc(&metrics->write_errors);
+        }
+        raw_http_conn_close(conn);
+        return RAW_HTTP_CONN_CLOSED;
+    }
+
+    if (conn->out_data != NULL) {
+        if (metrics != NULL) {
+            uint64_t now = metrics_now_ns();
+            metrics_observe(&metrics->write_response, now - conn->write_start_ns);
+            metrics_observe(&metrics->request_total, now - conn->request_start_ns);
+        }
+        conn->out_data = NULL;
+        conn->out_len = 0;
+        conn->out_pos = 0;
+        conn->write_start_ns = 0;
+        conn->request_start_ns = 0;
+    }
+
+    if (conn->close_after_write) {
+        raw_http_conn_close(conn);
+        return RAW_HTTP_CONN_CLOSED;
+    }
+    return RAW_HTTP_CONN_WANT_READ;
+}
+
+static uint32_t raw_http_conn_process_buffer(raw_http_conn *conn) {
+    RinhaMetrics *metrics = app_metrics(conn->app);
+
+    for (;;) {
+        if (conn->closed) {
+            return RAW_HTTP_CONN_CLOSED;
+        }
+        if (raw_http_conn_wants_write(conn)) {
+            return RAW_HTTP_CONN_WANT_WRITE;
+        }
+        if (conn->pos == conn->used) {
+            conn->pos = 0;
+            conn->used = 0;
+            return RAW_HTTP_CONN_WANT_READ;
+        }
+
+        ssize_t relative_header_end = raw_http_index_header_end(conn->buffer + conn->pos,
+                                                                conn->used - conn->pos);
+        if (relative_header_end < 0) {
+            if (conn->used == sizeof(conn->buffer)) {
+                if (conn->pos > 0) {
+                    raw_http_conn_compact(conn);
+                    relative_header_end = raw_http_index_header_end(conn->buffer, conn->used);
+                    if (relative_header_end >= 0) {
+                        continue;
+                    }
+                }
+                if (conn->used == sizeof(conn->buffer)) {
+                    if (metrics != NULL) {
+                        metrics_inc(&metrics->malformed_requests);
+                        metrics_inc(&metrics->epoll_parser_errors);
+                    }
+                    raw_http_conn_set_static_response(conn, &RESPONSE_BAD_REQUEST, true);
+                    return raw_http_conn_flush(conn);
+                }
+            }
+            return RAW_HTTP_CONN_WANT_READ;
+        }
+
+        size_t header_start = conn->pos;
+        size_t header_end = conn->pos + (size_t)relative_header_end;
+        parsed_request request;
+        if (parse_request_header(conn->buffer + header_start, header_end - header_start, &request) != 0) {
+            if (metrics != NULL) {
+                metrics_inc(&metrics->malformed_requests);
+                metrics_inc(&metrics->epoll_parser_errors);
+            }
+            raw_http_conn_set_static_response(conn, &RESPONSE_BAD_REQUEST, true);
+            return raw_http_conn_flush(conn);
+        }
+
+        size_t header_len = header_end - header_start;
+        if (request.content_length > RINHA_MAX_REQUEST_BYTES ||
+            header_len > RINHA_MAX_REQUEST_BYTES - request.content_length) {
+            if (metrics != NULL) {
+                metrics_inc(&metrics->malformed_requests);
+                metrics_inc(&metrics->epoll_parser_errors);
+            }
+            raw_http_conn_set_static_response(conn, &RESPONSE_BAD_REQUEST, true);
+            return raw_http_conn_flush(conn);
+        }
+
+        size_t body_end = header_end + request.content_length;
+        if (conn->used < body_end) {
+            if (body_end > sizeof(conn->buffer)) {
+                if (metrics != NULL) {
+                    metrics_inc(&metrics->malformed_requests);
+                    metrics_inc(&metrics->epoll_parser_errors);
+                }
+                raw_http_conn_set_static_response(conn, &RESPONSE_BAD_REQUEST, true);
+                return raw_http_conn_flush(conn);
+            }
+            return RAW_HTTP_CONN_WANT_READ;
+        }
+
+        if (metrics != NULL) {
+            metrics_inc(&metrics->request_count);
+            conn->request_start_ns = metrics_now_ns();
+        }
+
+        const char *response_data = NULL;
+        size_t response_len = 0;
+        prepare_response(&request,
+                         conn->buffer + header_end,
+                         conn->app,
+                         conn->dynamic_response,
+                         sizeof(conn->dynamic_response),
+                         &response_data,
+                         &response_len);
+        conn->out_data = response_data;
+        conn->out_len = response_len;
+        conn->out_pos = 0;
+        conn->close_after_write = false;
+        conn->write_start_ns = metrics != NULL ? metrics_now_ns() : 0u;
+        conn->pos = body_end;
+        if (conn->pos == conn->used) {
+            conn->pos = 0;
+            conn->used = 0;
+        }
+
+        uint32_t status = raw_http_conn_flush(conn);
+        if (status != RAW_HTTP_CONN_WANT_READ) {
+            return status;
+        }
+    }
+}
+
+uint32_t raw_http_conn_on_writable(raw_http_conn *conn) {
+    uint32_t status = raw_http_conn_flush(conn);
+    if (status != RAW_HTTP_CONN_WANT_READ) {
+        return status;
+    }
+    return raw_http_conn_process_buffer(conn);
+}
+
+uint32_t raw_http_conn_on_readable(raw_http_conn *conn) {
+    RinhaMetrics *metrics = app_metrics(conn->app);
+    if (raw_http_conn_wants_write(conn)) {
+        return RAW_HTTP_CONN_WANT_WRITE;
+    }
+
+    for (;;) {
+        if (conn->used == sizeof(conn->buffer)) {
+            raw_http_conn_compact(conn);
+            if (conn->used == sizeof(conn->buffer)) {
+                if (metrics != NULL) {
+                    metrics_inc(&metrics->malformed_requests);
+                    metrics_inc(&metrics->epoll_parser_errors);
+                }
+                raw_http_conn_set_static_response(conn, &RESPONSE_BAD_REQUEST, true);
+                return raw_http_conn_flush(conn);
+            }
+        }
+
+        ssize_t n = recv(conn->fd, conn->buffer + conn->used, sizeof(conn->buffer) - conn->used, 0);
+        if (n > 0) {
+            conn->used += (size_t)n;
+            uint32_t status = raw_http_conn_process_buffer(conn);
+            if (status != RAW_HTTP_CONN_WANT_READ) {
+                return status;
+            }
+            continue;
+        }
+        if (n == 0) {
+            if (conn->used != conn->pos) {
+                if (metrics != NULL) {
+                    metrics_inc(&metrics->malformed_requests);
+                    metrics_inc(&metrics->epoll_parser_errors);
+                }
+                raw_http_conn_set_static_response(conn, &RESPONSE_BAD_REQUEST, true);
+                return raw_http_conn_flush(conn);
+            }
+            raw_http_conn_close(conn);
+            return RAW_HTTP_CONN_CLOSED;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return raw_http_conn_process_buffer(conn);
+        }
+        if (metrics != NULL) {
+            metrics_inc(&metrics->read_errors);
+        }
+        raw_http_conn_close(conn);
+        return RAW_HTTP_CONN_CLOSED;
+    }
 }
 
 static void *connection_thread(void *arg) {

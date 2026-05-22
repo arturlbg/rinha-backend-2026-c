@@ -21,7 +21,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: rinha-c-phase8b:local
+    image: rinha-c-phase8c:local
     platform: linux/amd64
     user: "0:0"
     environment:
@@ -47,7 +47,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: rinha-c-phase8b:local
+    image: rinha-c-phase8c:local
     platform: linux/amd64
     user: "0:0"
     environment:

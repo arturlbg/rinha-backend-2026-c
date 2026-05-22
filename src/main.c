@@ -35,6 +35,9 @@ static fdpass_exec_mode parse_exec_mode(const char *mode) {
     if (strcmp(mode, "worker_pool") == 0) {
         return FDPASS_EXEC_WORKER_POOL;
     }
+    if (strcmp(mode, "epoll") == 0) {
+        return FDPASS_EXEC_EPOLL;
+    }
     fprintf(stderr, "invalid RINHA_EXEC_MODE=%s\n", mode);
     exit(1);
 }

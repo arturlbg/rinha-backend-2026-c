@@ -5,6 +5,7 @@
 #include "responses.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -54,6 +55,12 @@ static int write_all_test(int fd, const char *data, size_t len) {
         written += (size_t)n;
     }
     return 0;
+}
+
+static void set_nonblocking_test(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    CHECK(flags >= 0);
+    CHECK(fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0);
 }
 
 static void tiny_pause(void) {
@@ -110,6 +117,67 @@ static size_t run_connection_with_app(const test_chunk *chunks,
 
 static size_t run_connection(const test_chunk *chunks, size_t chunk_count, char *out, size_t out_cap) {
     return run_connection_with_app(chunks, chunk_count, out, out_cap, NULL);
+}
+
+static size_t run_nonblocking_connection_with_app(const test_chunk *chunks,
+                                                  size_t chunk_count,
+                                                  char *out,
+                                                  size_t out_cap,
+                                                  const raw_http_app *app) {
+    int sockets[2];
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+    if (failures != 0 && sockets[0] < 0) {
+        return 0;
+    }
+    set_nonblocking_test(sockets[1]);
+
+    raw_http_conn conn;
+    raw_http_conn_init(&conn, sockets[1], app);
+
+    for (size_t i = 0; i < chunk_count; i++) {
+        CHECK(write_all_test(sockets[0], chunks[i].data, chunks[i].len) == 0);
+        uint32_t status = raw_http_conn_on_readable(&conn);
+        for (int spin = 0; spin < 16 && status == RAW_HTTP_CONN_WANT_WRITE; spin++) {
+            status = raw_http_conn_on_writable(&conn);
+        }
+        CHECK(status == RAW_HTTP_CONN_WANT_READ || status == RAW_HTTP_CONN_WANT_WRITE || status == RAW_HTTP_CONN_CLOSED);
+    }
+
+    uint32_t status = raw_http_conn_on_readable(&conn);
+    for (int spin = 0; spin < 16 && status == RAW_HTTP_CONN_WANT_WRITE; spin++) {
+        status = raw_http_conn_on_writable(&conn);
+    }
+
+    size_t used = 0;
+    for (;;) {
+        ssize_t n = recv(sockets[0], out + used, out_cap - used, MSG_DONTWAIT);
+        if (n > 0) {
+            used += (size_t)n;
+            if (used == out_cap) {
+                break;
+            }
+            continue;
+        }
+        if (n == 0 || (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
+            break;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        CHECK(false);
+        break;
+    }
+
+    raw_http_conn_close(&conn);
+    close(sockets[0]);
+    return used;
+}
+
+static size_t run_nonblocking_connection(const test_chunk *chunks,
+                                         size_t chunk_count,
+                                         char *out,
+                                         size_t out_cap) {
+    return run_nonblocking_connection_with_app(chunks, chunk_count, out, out_cap, NULL);
 }
 
 static size_t make_request(char *out, size_t cap, const char *method, const char *path, const char *body) {
@@ -275,6 +343,45 @@ static void test_mixed_pipeline_fragment(void) {
     CHECK(count_responses(out, out_len) == 3);
 }
 
+static void test_nonblocking_single_request(void) {
+    char req[256];
+    size_t req_len = make_request(req, sizeof(req), "GET", "/ready", "");
+    test_chunk chunks[] = {{req, req_len}};
+    char out[1024];
+    size_t out_len = run_nonblocking_connection(chunks, 1, out, sizeof(out));
+    CHECK(count_responses(out, out_len) == 1);
+    CHECK(contains_text(out, out_len, "\r\n\r\nok"));
+}
+
+static void test_nonblocking_pipelined_requests(void) {
+    char req1[256];
+    char req2[256];
+    size_t req1_len = make_request(req1, sizeof(req1), "GET", "/ready", "");
+    size_t req2_len = make_request(req2, sizeof(req2), "POST", "/fraud-score", "{}");
+    char combined[512];
+    memcpy(combined, req1, req1_len);
+    memcpy(combined + req1_len, req2, req2_len);
+    test_chunk chunks[] = {{combined, req1_len + req2_len}};
+    char out[2048];
+    size_t out_len = run_nonblocking_connection(chunks, 1, out, sizeof(out));
+    CHECK(count_responses(out, out_len) == 2);
+    CHECK(contains_text(out, out_len, "{\"approved\":true,\"fraud_score\":0}"));
+}
+
+static void test_nonblocking_fragmented_header_and_body(void) {
+    char req[512];
+    size_t req_len = make_request(req, sizeof(req), "POST", "/fraud-score", "{}");
+    test_chunk chunks[] = {
+        {req, 8},
+        {req + 8, req_len - 9},
+        {req + req_len - 1, 1},
+    };
+    char out[1024];
+    size_t out_len = run_nonblocking_connection(chunks, 3, out, sizeof(out));
+    CHECK(count_responses(out, out_len) == 1);
+    CHECK(contains_text(out, out_len, "{\"approved\":true,\"fraud_score\":0}"));
+}
+
 static void test_unknown_and_wrong_method(void) {
     char unknown[256];
     char wrong[256];
@@ -429,6 +536,9 @@ int main(void) {
     test_fragmented_header();
     test_fragmented_body();
     test_mixed_pipeline_fragment();
+    test_nonblocking_single_request();
+    test_nonblocking_pipelined_requests();
+    test_nonblocking_fragmented_header_and_body();
     test_unknown_and_wrong_method();
     test_fraud_response_mapping();
     test_invalid_body_returns_safe_approved();

@@ -30,6 +30,14 @@ typedef struct {
     atomic_uint_fast64_t fd_queue_enqueued;
     atomic_uint_fast64_t fd_queue_dequeued;
     atomic_uint_fast64_t fd_queue_dropped;
+    atomic_uint_fast64_t epoll_registered_connections;
+    atomic_uint_fast64_t epoll_closed_connections;
+    atomic_uint_fast64_t epoll_read_events;
+    atomic_uint_fast64_t epoll_write_events;
+    atomic_uint_fast64_t epoll_partial_writes;
+    atomic_uint_fast64_t epoll_parser_errors;
+    atomic_uint_fast64_t epoll_open_connections;
+    atomic_uint_fast64_t epoll_max_open_connections;
 
     RinhaMetricHistogram request_total;
     RinhaMetricHistogram vectorize;
@@ -44,6 +52,8 @@ void metrics_init(RinhaMetrics *metrics, bool enabled);
 bool metrics_parse_enabled(const char *value);
 uint64_t metrics_now_ns(void);
 void metrics_inc(atomic_uint_fast64_t *counter);
+void metrics_dec(atomic_uint_fast64_t *counter);
+void metrics_update_max(atomic_uint_fast64_t *counter, uint64_t value);
 void metrics_observe(RinhaMetricHistogram *histogram, uint64_t ns);
 size_t metrics_write_text(const RinhaMetrics *metrics,
                           char *out,

@@ -7,7 +7,8 @@
 
 typedef enum {
     FDPASS_EXEC_PER_CONNECTION = 0,
-    FDPASS_EXEC_WORKER_POOL = 1
+    FDPASS_EXEC_WORKER_POOL = 1,
+    FDPASS_EXEC_EPOLL = 2
 } fdpass_exec_mode;
 
 typedef struct {
