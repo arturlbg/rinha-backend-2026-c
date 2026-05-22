@@ -206,6 +206,19 @@ static void test_candidate_cap_across_probes(void) {
     CHECK(result.stats.clusters_scanned == 2);
 }
 
+static void test_trace_exposes_top5_and_probes(void) {
+    TinyIndex tiny;
+    make_tiny_index(&tiny);
+    int16_t query[IVF8_INDEX_DIMS] = {0};
+    Ivf8SearchConfig cfg = {.max_candidates = 8, .probes = 2};
+    Ivf8SearchTraceResult trace = ivf8_search_trace(&tiny.index, query, &cfg);
+    CHECK(trace.probe_count == 2);
+    CHECK(trace.probes[0].cluster == 0);
+    CHECK(trace.result.fraud_count == ivf8_top5_fraud_count(trace.top));
+    CHECK(trace.top[0].seq != UINT32_MAX);
+    CHECK(trace.top[IVF8_SEARCH_TOP_K - 1u].distance != UINT64_MAX);
+}
+
 int main(void) {
     test_distance();
     test_search_impl_parse_and_detection();
@@ -214,6 +227,7 @@ int main(void) {
     test_probe_selection();
     test_tiny_search_and_phantom_lanes();
     test_candidate_cap_across_probes();
+    test_trace_exposes_top5_and_probes();
 
     if (failures != 0) {
         fprintf(stderr, "%d ivf8 search test failure(s)\n", failures);

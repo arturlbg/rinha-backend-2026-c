@@ -58,6 +58,13 @@ typedef struct {
     uint64_t distance;
 } Ivf8Probe;
 
+typedef struct {
+    Ivf8SearchResult result;
+    Ivf8Neighbor top[IVF8_SEARCH_TOP_K];
+    Ivf8Probe probes[IVF8_SEARCH_MAX_PROBES];
+    uint32_t probe_count;
+} Ivf8SearchTraceResult;
+
 uint64_t ivf8_centroid_distance(const Ivf8Index *idx, const int16_t query[IVF8_INDEX_DIMS], uint32_t cluster);
 uint64_t ivf8_bbox_distance(const Ivf8Index *idx, const int16_t query[IVF8_INDEX_DIMS], uint32_t cluster);
 uint64_t ivf8_block_lane_distance(const int16_t *block_data,
@@ -88,6 +95,12 @@ Ivf8SearchResult ivf8_search(const Ivf8Index *idx,
 Ivf8SearchResult ivf8_search_profiled(const Ivf8Index *idx,
                                        const int16_t query[IVF8_INDEX_DIMS],
                                        const Ivf8SearchConfig *cfg);
+Ivf8SearchTraceResult ivf8_search_trace(const Ivf8Index *idx,
+                                         const int16_t query[IVF8_INDEX_DIMS],
+                                         const Ivf8SearchConfig *cfg);
+Ivf8SearchTraceResult ivf8_search_trace_profiled(const Ivf8Index *idx,
+                                                  const int16_t query[IVF8_INDEX_DIMS],
+                                                  const Ivf8SearchConfig *cfg);
 uint8_t ivf8_search_fraud_count(const Ivf8Index *idx,
                                 const int16_t query[IVF8_INDEX_DIMS],
                                 const Ivf8SearchConfig *cfg);

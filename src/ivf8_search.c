@@ -420,10 +420,16 @@ static void scan_probe(const Ivf8Index *idx,
 static Ivf8SearchResult ivf8_search_internal(const Ivf8Index *idx,
                                              const int16_t query[IVF8_INDEX_DIMS],
                                              const Ivf8SearchConfig *cfg,
-                                             bool profiled) {
+                                             bool profiled,
+                                             Ivf8Neighbor trace_top[IVF8_SEARCH_TOP_K],
+                                             Ivf8Probe trace_probes[IVF8_SEARCH_MAX_PROBES],
+                                             uint32_t *trace_probe_count) {
     Ivf8SearchResult result;
     memset(&result, 0, sizeof(result));
     if (idx == NULL || query == NULL || idx->k == 0) {
+        if (trace_probe_count != NULL) {
+            *trace_probe_count = 0;
+        }
         return result;
     }
 
@@ -438,6 +444,12 @@ static Ivf8SearchResult ivf8_search_internal(const Ivf8Index *idx,
         probe_count = ivf8_select_probes_avx2(idx, query, probe_count, probes);
     } else {
         probe_count = ivf8_select_probes(idx, query, probe_count, probes);
+    }
+    if (trace_probe_count != NULL) {
+        *trace_probe_count = probe_count;
+    }
+    if (trace_probes != NULL) {
+        memcpy(trace_probes, probes, sizeof(probes));
     }
 
     Ivf8Neighbor top[IVF8_SEARCH_TOP_K];
@@ -454,6 +466,9 @@ static Ivf8SearchResult ivf8_search_internal(const Ivf8Index *idx,
     }
 
     result.fraud_count = ivf8_top5_fraud_count(top);
+    if (trace_top != NULL) {
+        memcpy(trace_top, top, sizeof(top));
+    }
     if (profiled) {
         result.profile.total_ns = search_now_ns() - total_start;
     }
@@ -463,13 +478,31 @@ static Ivf8SearchResult ivf8_search_internal(const Ivf8Index *idx,
 Ivf8SearchResult ivf8_search(const Ivf8Index *idx,
                               const int16_t query[IVF8_INDEX_DIMS],
                               const Ivf8SearchConfig *cfg) {
-    return ivf8_search_internal(idx, query, cfg, false);
+    return ivf8_search_internal(idx, query, cfg, false, NULL, NULL, NULL);
 }
 
 Ivf8SearchResult ivf8_search_profiled(const Ivf8Index *idx,
                                        const int16_t query[IVF8_INDEX_DIMS],
                                        const Ivf8SearchConfig *cfg) {
-    return ivf8_search_internal(idx, query, cfg, true);
+    return ivf8_search_internal(idx, query, cfg, true, NULL, NULL, NULL);
+}
+
+Ivf8SearchTraceResult ivf8_search_trace(const Ivf8Index *idx,
+                                         const int16_t query[IVF8_INDEX_DIMS],
+                                         const Ivf8SearchConfig *cfg) {
+    Ivf8SearchTraceResult trace;
+    memset(&trace, 0, sizeof(trace));
+    trace.result = ivf8_search_internal(idx, query, cfg, false, trace.top, trace.probes, &trace.probe_count);
+    return trace;
+}
+
+Ivf8SearchTraceResult ivf8_search_trace_profiled(const Ivf8Index *idx,
+                                                  const int16_t query[IVF8_INDEX_DIMS],
+                                                  const Ivf8SearchConfig *cfg) {
+    Ivf8SearchTraceResult trace;
+    memset(&trace, 0, sizeof(trace));
+    trace.result = ivf8_search_internal(idx, query, cfg, true, trace.top, trace.probes, &trace.probe_count);
+    return trace;
 }
 
 uint8_t ivf8_search_fraud_count(const Ivf8Index *idx,

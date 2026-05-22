@@ -259,14 +259,16 @@ static double ns_to_us(uint64_t ns) {
 }
 
 static void record_confusion(EvalStats *stats, int expected_approved, int approved) {
-    if (expected_approved && approved) {
-        stats->tp++;
-    } else if (!expected_approved && !approved) {
-        stats->tn++;
-    } else if (!expected_approved && approved) {
-        stats->fp++;
-    } else {
+    if (approved == expected_approved) {
+        if (approved) {
+            stats->tn++;
+        } else {
+            stats->tp++;
+        }
+    } else if (approved) {
         stats->fn++;
+    } else {
+        stats->fp++;
     }
 }
 
