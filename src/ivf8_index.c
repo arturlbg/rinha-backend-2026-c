@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include "ivf8_index.h"
@@ -10,6 +11,15 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+enum {
+    IVF8_ADVICE_WILLNEED = 1u << 0,
+    IVF8_ADVICE_RANDOM = 1u << 1,
+    IVF8_ADVICE_HUGEPAGE = 1u << 2,
+    IVF8_ADVICE_POPULATE_READ = 1u << 3,
+};
+
+static volatile uint64_t ivf8_touch_sink = 0;
 
 static void set_error(char *err, size_t err_len, const char *message) {
     if (err != NULL && err_len > 0) {
@@ -305,4 +315,48 @@ void ivf8_index_close(Ivf8Index *index) {
     }
     memset(index, 0, sizeof(*index));
     index->fd = -1;
+}
+
+uint32_t ivf8_index_apply_memory_advice(const Ivf8Index *index) {
+    if (index == NULL || index->map == NULL || index->file_size == 0) {
+        return 0;
+    }
+
+    uint32_t applied = 0;
+#ifdef MADV_WILLNEED
+    if (madvise(index->map, index->file_size, MADV_WILLNEED) == 0) {
+        applied |= IVF8_ADVICE_WILLNEED;
+    }
+#endif
+#ifdef MADV_RANDOM
+    if (madvise(index->map, index->file_size, MADV_RANDOM) == 0) {
+        applied |= IVF8_ADVICE_RANDOM;
+    }
+#endif
+#ifdef MADV_HUGEPAGE
+    if (madvise(index->map, index->file_size, MADV_HUGEPAGE) == 0) {
+        applied |= IVF8_ADVICE_HUGEPAGE;
+    }
+#endif
+#ifdef MADV_POPULATE_READ
+    if (madvise(index->map, index->file_size, MADV_POPULATE_READ) == 0) {
+        applied |= IVF8_ADVICE_POPULATE_READ;
+    }
+#endif
+    return applied;
+}
+
+uint64_t ivf8_index_touch_pages(const Ivf8Index *index) {
+    if (index == NULL || index->map == NULL || index->file_size == 0) {
+        return 0;
+    }
+
+    const uint8_t *bytes = (const uint8_t *)index->map;
+    uint64_t sum = 0;
+    for (size_t offset = 0; offset < index->file_size; offset += 4096u) {
+        sum += bytes[offset];
+    }
+    sum += bytes[index->file_size - 1u];
+    ivf8_touch_sink ^= sum;
+    return sum;
 }

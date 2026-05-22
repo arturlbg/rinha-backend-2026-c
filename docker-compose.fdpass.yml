@@ -21,13 +21,18 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: rinha-c-phase8c:local
+      args:
+        MAKE_TARGET: "${RINHA_MAKE_TARGET:-all}"
+    image: rinha-c-phase8d:local
     platform: linux/amd64
     user: "0:0"
     environment:
       RINHA_LISTEN_MODE: "fdpass"
       RINHA_UNIX_SOCKET: "/sockets/api1.ctrl"
       RINHA_INDEX_PATH: "/app/resources/index.bin"
+      RINHA_INDEX_WARMUP: "${RINHA_INDEX_WARMUP:-off}"
+      RINHA_INDEX_WARMUP_QUERIES: "${RINHA_INDEX_WARMUP_QUERIES:-2048}"
+      RINHA_INDEX_MADVISE: "${RINHA_INDEX_MADVISE:-false}"
       RINHA_SEARCH_IMPL: "${RINHA_SEARCH_IMPL:-scalar}"
       RINHA_IVF8_MAX_CANDIDATES: "4096"
       RINHA_IVF8_PROBES: "8"
@@ -47,13 +52,18 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: rinha-c-phase8c:local
+      args:
+        MAKE_TARGET: "${RINHA_MAKE_TARGET:-all}"
+    image: rinha-c-phase8d:local
     platform: linux/amd64
     user: "0:0"
     environment:
       RINHA_LISTEN_MODE: "fdpass"
       RINHA_UNIX_SOCKET: "/sockets/api2.ctrl"
       RINHA_INDEX_PATH: "/app/resources/index.bin"
+      RINHA_INDEX_WARMUP: "${RINHA_INDEX_WARMUP:-off}"
+      RINHA_INDEX_WARMUP_QUERIES: "${RINHA_INDEX_WARMUP_QUERIES:-2048}"
+      RINHA_INDEX_MADVISE: "${RINHA_INDEX_MADVISE:-false}"
       RINHA_SEARCH_IMPL: "${RINHA_SEARCH_IMPL:-scalar}"
       RINHA_IVF8_MAX_CANDIDATES: "4096"
       RINHA_IVF8_PROBES: "8"

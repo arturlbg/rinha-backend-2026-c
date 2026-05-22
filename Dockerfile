@@ -2,6 +2,7 @@
 
 FROM --platform=$BUILDPLATFORM gcc:13-bookworm AS build
 WORKDIR /src
+ARG MAKE_TARGET=all
 
 COPY Makefile ./
 COPY include ./include
@@ -9,7 +10,7 @@ COPY src ./src
 COPY tests ./tests
 COPY tools ./tools
 
-RUN make clean && make
+RUN make clean && make ${MAKE_TARGET}
 
 FROM build AS test
 RUN make test

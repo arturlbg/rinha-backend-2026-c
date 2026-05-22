@@ -66,6 +66,7 @@ int ivf8_index_compute_layout(const Ivf8Header *header, Ivf8Layout *out, char *e
 int ivf8_index_open(const char *path, Ivf8Index *out, char *err, size_t err_len);
 int ivf8_index_validate(const Ivf8Index *index, char *err, size_t err_len);
 void ivf8_index_close(Ivf8Index *index);
+uint32_t ivf8_index_apply_memory_advice(const Ivf8Index *index);
+uint64_t ivf8_index_touch_pages(const Ivf8Index *index);
 
 #endif
-

@@ -30,9 +30,13 @@ EVALUATE_C_SOURCES := tools/evaluate_c.c src/fastvector.c src/ivf8_index.c src/i
 BENCH_SEARCH_TARGET := $(BUILD_DIR)/bench_search
 BENCH_SEARCH_SOURCES := tools/bench_search.c src/fastvector.c src/ivf8_index.c src/ivf8_search.c src/metrics.c
 
-.PHONY: all clean test tools
+.PHONY: all clean test tools release
 
 all: $(TARGET)
+
+release: CFLAGS += -O3 -DNDEBUG -flto
+release: LDFLAGS += -flto
+release: clean all
 
 $(TARGET): $(OBJECTS)
 	$(CC) $(OBJECTS) -pthread $(LDFLAGS) -o $@

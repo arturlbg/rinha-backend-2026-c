@@ -27,10 +27,24 @@ typedef struct {
     int approved_mismatches;
     uint64_t vectorize_ns_sum;
     uint64_t search_ns_sum;
+    uint64_t centroid_ns_sum;
+    uint64_t probe_select_ns_sum;
+    uint64_t scan_ns_sum;
+    uint64_t top5_ns_sum;
     uint64_t candidates_sum;
+    uint64_t blocks_sum;
+    uint64_t clusters_sum;
     uint64_t *vectorize_ns;
     uint64_t *search_ns;
+    uint64_t *centroid_ns;
+    uint64_t *probe_select_ns;
+    uint64_t *scan_ns;
+    uint64_t *top5_ns;
     uint32_t *candidates;
+    uint32_t *blocks;
+    uint32_t *clusters;
+    uint32_t *largest_cluster_candidates;
+    uint32_t *largest_cluster_blocks;
     size_t capacity;
 } BenchStats;
 
@@ -208,16 +222,42 @@ static int stats_reserve(BenchStats *stats, size_t needed) {
     }
     uint64_t *vec = (uint64_t *)realloc(stats->vectorize_ns, next * sizeof(uint64_t));
     uint64_t *search = (uint64_t *)realloc(stats->search_ns, next * sizeof(uint64_t));
+    uint64_t *centroid = (uint64_t *)realloc(stats->centroid_ns, next * sizeof(uint64_t));
+    uint64_t *probe = (uint64_t *)realloc(stats->probe_select_ns, next * sizeof(uint64_t));
+    uint64_t *scan = (uint64_t *)realloc(stats->scan_ns, next * sizeof(uint64_t));
+    uint64_t *top5 = (uint64_t *)realloc(stats->top5_ns, next * sizeof(uint64_t));
     uint32_t *candidates = (uint32_t *)realloc(stats->candidates, next * sizeof(uint32_t));
-    if (vec == NULL || search == NULL || candidates == NULL) {
+    uint32_t *blocks = (uint32_t *)realloc(stats->blocks, next * sizeof(uint32_t));
+    uint32_t *clusters = (uint32_t *)realloc(stats->clusters, next * sizeof(uint32_t));
+    uint32_t *largest_candidates = (uint32_t *)realloc(stats->largest_cluster_candidates, next * sizeof(uint32_t));
+    uint32_t *largest_blocks = (uint32_t *)realloc(stats->largest_cluster_blocks, next * sizeof(uint32_t));
+    if (vec == NULL || search == NULL || centroid == NULL || probe == NULL || scan == NULL ||
+        top5 == NULL || candidates == NULL || blocks == NULL || clusters == NULL ||
+        largest_candidates == NULL || largest_blocks == NULL) {
         free(vec);
         free(search);
+        free(centroid);
+        free(probe);
+        free(scan);
+        free(top5);
         free(candidates);
+        free(blocks);
+        free(clusters);
+        free(largest_candidates);
+        free(largest_blocks);
         return -1;
     }
     stats->vectorize_ns = vec;
     stats->search_ns = search;
+    stats->centroid_ns = centroid;
+    stats->probe_select_ns = probe;
+    stats->scan_ns = scan;
+    stats->top5_ns = top5;
     stats->candidates = candidates;
+    stats->blocks = blocks;
+    stats->clusters = clusters;
+    stats->largest_cluster_candidates = largest_candidates;
+    stats->largest_cluster_blocks = largest_blocks;
     stats->capacity = next;
     return 0;
 }
@@ -325,9 +365,9 @@ int main(int argc, char **argv) {
         }
 
         start = metrics_now_ns();
-        Ivf8SearchResult result = ivf8_search(&index, query, &cfg);
+        Ivf8SearchResult result = ivf8_search_profiled(&index, query, &cfg);
         finish = metrics_now_ns();
-        uint64_t search_ns = finish - start;
+        uint64_t search_ns = result.profile.total_ns != 0 ? result.profile.total_ns : finish - start;
 
         if (compare_scalar) {
             if (scalar_result.fraud_count != result.fraud_count) {
@@ -353,16 +393,38 @@ int main(int argc, char **argv) {
 
         stats.vectorize_ns[stats.total] = vectorize_ns;
         stats.search_ns[stats.total] = search_ns;
+        stats.centroid_ns[stats.total] = result.profile.centroid_ns;
+        stats.probe_select_ns[stats.total] = result.profile.probe_select_ns;
+        stats.scan_ns[stats.total] = result.profile.scan_ns;
+        stats.top5_ns[stats.total] = result.profile.top5_ns;
         stats.candidates[stats.total] = result.stats.candidates_scanned;
+        stats.blocks[stats.total] = result.stats.blocks_scanned;
+        stats.clusters[stats.total] = result.stats.clusters_scanned;
+        stats.largest_cluster_candidates[stats.total] = result.stats.largest_scanned_cluster_candidates;
+        stats.largest_cluster_blocks[stats.total] = result.stats.largest_scanned_cluster_blocks;
         stats.vectorize_ns_sum += vectorize_ns;
         stats.search_ns_sum += search_ns;
+        stats.centroid_ns_sum += result.profile.centroid_ns;
+        stats.probe_select_ns_sum += result.profile.probe_select_ns;
+        stats.scan_ns_sum += result.profile.scan_ns;
+        stats.top5_ns_sum += result.profile.top5_ns;
         stats.candidates_sum += result.stats.candidates_scanned;
+        stats.blocks_sum += result.stats.blocks_scanned;
+        stats.clusters_sum += result.stats.clusters_scanned;
         stats.total++;
     }
 
     qsort(stats.vectorize_ns, (size_t)stats.total, sizeof(uint64_t), compare_u64);
     qsort(stats.search_ns, (size_t)stats.total, sizeof(uint64_t), compare_u64);
+    qsort(stats.centroid_ns, (size_t)stats.total, sizeof(uint64_t), compare_u64);
+    qsort(stats.probe_select_ns, (size_t)stats.total, sizeof(uint64_t), compare_u64);
+    qsort(stats.scan_ns, (size_t)stats.total, sizeof(uint64_t), compare_u64);
+    qsort(stats.top5_ns, (size_t)stats.total, sizeof(uint64_t), compare_u64);
     qsort(stats.candidates, (size_t)stats.total, sizeof(uint32_t), compare_u32);
+    qsort(stats.blocks, (size_t)stats.total, sizeof(uint32_t), compare_u32);
+    qsort(stats.clusters, (size_t)stats.total, sizeof(uint32_t), compare_u32);
+    qsort(stats.largest_cluster_candidates, (size_t)stats.total, sizeof(uint32_t), compare_u32);
+    qsort(stats.largest_cluster_blocks, (size_t)stats.total, sizeof(uint32_t), compare_u32);
 
     printf("evaluated=%d\n", stats.total);
     printf("search_impl=%s\n", ivf8_search_impl_name(cfg.impl));
@@ -384,15 +446,53 @@ int main(int argc, char **argv) {
         printf("p50_search_us=%.3f\n", ns_to_us(stats.search_ns[p50]));
         printf("p95_search_us=%.3f\n", ns_to_us(stats.search_ns[p95]));
         printf("p99_search_us=%.3f\n", ns_to_us(stats.search_ns[p99]));
+        printf("avg_centroid_us=%.3f\n", ns_to_us(stats.centroid_ns_sum / (uint64_t)stats.total));
+        printf("p50_centroid_us=%.3f\n", ns_to_us(stats.centroid_ns[p50]));
+        printf("p95_centroid_us=%.3f\n", ns_to_us(stats.centroid_ns[p95]));
+        printf("p99_centroid_us=%.3f\n", ns_to_us(stats.centroid_ns[p99]));
+        printf("avg_probe_select_us=%.3f\n", ns_to_us(stats.probe_select_ns_sum / (uint64_t)stats.total));
+        printf("p50_probe_select_us=%.3f\n", ns_to_us(stats.probe_select_ns[p50]));
+        printf("p95_probe_select_us=%.3f\n", ns_to_us(stats.probe_select_ns[p95]));
+        printf("p99_probe_select_us=%.3f\n", ns_to_us(stats.probe_select_ns[p99]));
+        printf("avg_scan_us=%.3f\n", ns_to_us(stats.scan_ns_sum / (uint64_t)stats.total));
+        printf("p50_scan_us=%.3f\n", ns_to_us(stats.scan_ns[p50]));
+        printf("p95_scan_us=%.3f\n", ns_to_us(stats.scan_ns[p95]));
+        printf("p99_scan_us=%.3f\n", ns_to_us(stats.scan_ns[p99]));
+        printf("avg_top5_us=%.3f\n", ns_to_us(stats.top5_ns_sum / (uint64_t)stats.total));
+        printf("p50_top5_us=%.3f\n", ns_to_us(stats.top5_ns[p50]));
+        printf("p95_top5_us=%.3f\n", ns_to_us(stats.top5_ns[p95]));
+        printf("p99_top5_us=%.3f\n", ns_to_us(stats.top5_ns[p99]));
         printf("avg_candidates=%.2f\n", (double)stats.candidates_sum / (double)stats.total);
         printf("p50_candidates=%u\n", stats.candidates[p50]);
         printf("p95_candidates=%u\n", stats.candidates[p95]);
         printf("p99_candidates=%u\n", stats.candidates[p99]);
+        printf("avg_blocks=%.2f\n", (double)stats.blocks_sum / (double)stats.total);
+        printf("p50_blocks=%u\n", stats.blocks[p50]);
+        printf("p95_blocks=%u\n", stats.blocks[p95]);
+        printf("p99_blocks=%u\n", stats.blocks[p99]);
+        printf("avg_clusters=%.2f\n", (double)stats.clusters_sum / (double)stats.total);
+        printf("p50_clusters=%u\n", stats.clusters[p50]);
+        printf("p95_clusters=%u\n", stats.clusters[p95]);
+        printf("p99_clusters=%u\n", stats.clusters[p99]);
+        printf("p50_largest_cluster_candidates=%u\n", stats.largest_cluster_candidates[p50]);
+        printf("p95_largest_cluster_candidates=%u\n", stats.largest_cluster_candidates[p95]);
+        printf("p99_largest_cluster_candidates=%u\n", stats.largest_cluster_candidates[p99]);
+        printf("p50_largest_cluster_blocks=%u\n", stats.largest_cluster_blocks[p50]);
+        printf("p95_largest_cluster_blocks=%u\n", stats.largest_cluster_blocks[p95]);
+        printf("p99_largest_cluster_blocks=%u\n", stats.largest_cluster_blocks[p99]);
     }
 
     free(stats.vectorize_ns);
     free(stats.search_ns);
+    free(stats.centroid_ns);
+    free(stats.probe_select_ns);
+    free(stats.scan_ns);
+    free(stats.top5_ns);
     free(stats.candidates);
+    free(stats.blocks);
+    free(stats.clusters);
+    free(stats.largest_cluster_candidates);
+    free(stats.largest_cluster_blocks);
     free(data);
     ivf8_index_close(&index);
     return stats.errors == 0 ? 0 : 1;

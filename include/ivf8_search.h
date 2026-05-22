@@ -26,13 +26,25 @@ typedef struct {
     uint32_t centroids_scored;
     uint32_t clusters_scanned;
     uint32_t candidates_scanned;
+    uint32_t blocks_scanned;
+    uint32_t largest_scanned_cluster_candidates;
+    uint32_t largest_scanned_cluster_blocks;
     uint32_t bbox_pruned;
     uint32_t radius_pruned;
 } Ivf8SearchStats;
 
 typedef struct {
+    uint64_t total_ns;
+    uint64_t centroid_ns;
+    uint64_t probe_select_ns;
+    uint64_t scan_ns;
+    uint64_t top5_ns;
+} Ivf8SearchProfile;
+
+typedef struct {
     uint8_t fraud_count;
     Ivf8SearchStats stats;
+    Ivf8SearchProfile profile;
 } Ivf8SearchResult;
 
 typedef struct {
@@ -73,6 +85,9 @@ uint32_t ivf8_select_probes(const Ivf8Index *idx,
 Ivf8SearchResult ivf8_search(const Ivf8Index *idx,
                               const int16_t query[IVF8_INDEX_DIMS],
                               const Ivf8SearchConfig *cfg);
+Ivf8SearchResult ivf8_search_profiled(const Ivf8Index *idx,
+                                       const int16_t query[IVF8_INDEX_DIMS],
+                                       const Ivf8SearchConfig *cfg);
 uint8_t ivf8_search_fraud_count(const Ivf8Index *idx,
                                 const int16_t query[IVF8_INDEX_DIMS],
                                 const Ivf8SearchConfig *cfg);

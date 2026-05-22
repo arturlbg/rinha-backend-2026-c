@@ -12,6 +12,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef enum {
+    INDEX_WARMUP_OFF = 0,
+    INDEX_WARMUP_TOUCH = 1,
+    INDEX_WARMUP_SEARCH = 2
+} index_warmup_mode;
+
 static unsigned int env_u32(const char *name, unsigned int fallback) {
     const char *raw = getenv(name);
     if (raw == NULL || raw[0] == '\0') {
@@ -40,6 +46,70 @@ static fdpass_exec_mode parse_exec_mode(const char *mode) {
     }
     fprintf(stderr, "invalid RINHA_EXEC_MODE=%s\n", mode);
     exit(1);
+}
+
+static index_warmup_mode parse_index_warmup_mode(const char *mode) {
+    if (mode == NULL || mode[0] == '\0' || strcmp(mode, "off") == 0) {
+        return INDEX_WARMUP_OFF;
+    }
+    if (strcmp(mode, "touch") == 0) {
+        return INDEX_WARMUP_TOUCH;
+    }
+    if (strcmp(mode, "search") == 0) {
+        return INDEX_WARMUP_SEARCH;
+    }
+    fprintf(stderr, "invalid RINHA_INDEX_WARMUP=%s\n", mode);
+    exit(1);
+}
+
+static int16_t clamp_i16_index_value(int32_t value) {
+    if (value < -10000) {
+        return -10000;
+    }
+    if (value > 10000) {
+        return 10000;
+    }
+    return (int16_t)value;
+}
+
+static void run_index_warmup(const Ivf8Index *index,
+                             const Ivf8SearchConfig *search_config,
+                             index_warmup_mode mode,
+                             uint32_t queries,
+                             bool use_madvise) {
+    if (mode == INDEX_WARMUP_OFF) {
+        return;
+    }
+
+    uint64_t start = metrics_now_ns();
+    uint32_t advice = use_madvise ? ivf8_index_apply_memory_advice(index) : 0u;
+    uint64_t sink = 0;
+    if (mode == INDEX_WARMUP_TOUCH) {
+        sink = ivf8_index_touch_pages(index);
+    } else if (mode == INDEX_WARMUP_SEARCH) {
+        if (queries == 0) {
+            queries = RINHA_DEFAULT_INDEX_WARMUP_QUERIES;
+        }
+        for (uint32_t i = 0; i < queries; i++) {
+            uint32_t block = (uint32_t)(((uint64_t)i * 2654435761ull) % index->blocks);
+            uint32_t lane = i % IVF8_INDEX_LANES;
+            uint32_t base = block * IVF8_INDEX_DIMS * IVF8_INDEX_LANES;
+            int16_t query[IVF8_INDEX_DIMS];
+            for (uint32_t dim = 0; dim < IVF8_INDEX_DIMS; dim++) {
+                int32_t noise = (int32_t)((i + dim) % 3u) - 1;
+                query[dim] = clamp_i16_index_value((int32_t)index->block_data[base + dim * IVF8_INDEX_LANES + lane] + noise);
+            }
+            sink += ivf8_search_fraud_count(index, query, search_config);
+        }
+    }
+    uint64_t elapsed_ns = metrics_now_ns() - start;
+    fprintf(stderr,
+            "index_warmup mode=%s queries=%u advice=0x%x elapsed_ms=%.3f sink=%llu\n",
+            mode == INDEX_WARMUP_TOUCH ? "touch" : "search",
+            mode == INDEX_WARMUP_SEARCH ? queries : 0u,
+            advice,
+            (double)elapsed_ns / 1000000.0,
+            (unsigned long long)sink);
 }
 
 int main(void) {
@@ -97,6 +167,10 @@ int main(void) {
         return 1;
     }
 
+    index_warmup_mode warmup_mode = parse_index_warmup_mode(getenv("RINHA_INDEX_WARMUP"));
+    uint32_t warmup_queries = env_u32("RINHA_INDEX_WARMUP_QUERIES", RINHA_DEFAULT_INDEX_WARMUP_QUERIES);
+    bool use_madvise = metrics_parse_enabled(getenv("RINHA_INDEX_MADVISE"));
+
     raw_http_app app = {
         .index = &index,
         .search_config = {
@@ -110,6 +184,8 @@ int main(void) {
         .workers = workers,
         .queue_size = queue_size,
     };
+
+    run_index_warmup(&index, &app.search_config, warmup_mode, warmup_queries, use_madvise);
 
     fdpass_options fdpass_opts = {
         .exec_mode = exec_mode,

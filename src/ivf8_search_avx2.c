@@ -24,8 +24,8 @@ static void distances_soa8_avx2(const int16_t *base,
                                 uint32_t stride,
                                 const int16_t query[IVF8_INDEX_DIMS],
                                 uint64_t out[IVF8_INDEX_LANES]) {
-    __m256d acc_lo = _mm256_setzero_pd();
-    __m256d acc_hi = _mm256_setzero_pd();
+    __m256i acc_lo = _mm256_setzero_si256();
+    __m256i acc_hi = _mm256_setzero_si256();
 
     for (uint32_t dim = 0; dim < IVF8_INDEX_DIMS; dim++) {
         const int16_t *values = base + dim * stride;
@@ -33,23 +33,16 @@ static void distances_soa8_avx2(const int16_t *base,
         __m128i q = _mm_set1_epi16(query[dim]);
         __m128i d16 = _mm_sub_epi16(q, v);
         __m256i d32 = _mm256_cvtepi16_epi32(d16);
+        __m256i squared32 = _mm256_mullo_epi32(d32, d32);
 
-        __m128i lo32 = _mm256_castsi256_si128(d32);
-        __m128i hi32 = _mm256_extracti128_si256(d32, 1);
-        __m256d dlo = _mm256_cvtepi32_pd(lo32);
-        __m256d dhi = _mm256_cvtepi32_pd(hi32);
-        acc_lo = _mm256_add_pd(acc_lo, _mm256_mul_pd(dlo, dlo));
-        acc_hi = _mm256_add_pd(acc_hi, _mm256_mul_pd(dhi, dhi));
+        __m128i lo32 = _mm256_castsi256_si128(squared32);
+        __m128i hi32 = _mm256_extracti128_si256(squared32, 1);
+        acc_lo = _mm256_add_epi64(acc_lo, _mm256_cvtepu32_epi64(lo32));
+        acc_hi = _mm256_add_epi64(acc_hi, _mm256_cvtepu32_epi64(hi32));
     }
 
-    double tmp_lo[4];
-    double tmp_hi[4];
-    _mm256_storeu_pd(tmp_lo, acc_lo);
-    _mm256_storeu_pd(tmp_hi, acc_hi);
-    for (uint32_t i = 0; i < 4; i++) {
-        out[i] = (uint64_t)tmp_lo[i];
-        out[i + 4u] = (uint64_t)tmp_hi[i];
-    }
+    _mm256_storeu_si256((__m256i *)(void *)out, acc_lo);
+    _mm256_storeu_si256((__m256i *)(void *)(out + 4u), acc_hi);
 }
 
 void ivf8_block_distances_avx2(const int16_t *block_data,

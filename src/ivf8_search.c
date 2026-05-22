@@ -1,8 +1,21 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "ivf8_search.h"
 
 #include <limits.h>
 #include <stdbool.h>
 #include <string.h>
+#include <time.h>
+
+static uint64_t search_now_ns(void) {
+    struct timespec ts;
+#ifdef CLOCK_MONOTONIC_RAW
+    (void)clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+#else
+    (void)clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
 
 static uint32_t normalized_probe_count(const Ivf8Index *idx, const Ivf8SearchConfig *cfg) {
     uint32_t probes = IVF8_SEARCH_DEFAULT_PROBES;
@@ -116,6 +129,11 @@ void ivf8_top5_init(Ivf8Neighbor top[IVF8_SEARCH_TOP_K]) {
 }
 
 void ivf8_top5_insert(Ivf8Neighbor top[IVF8_SEARCH_TOP_K], Ivf8Neighbor candidate) {
+    if (candidate.distance > top[IVF8_SEARCH_TOP_K - 1u].distance ||
+        (candidate.distance == top[IVF8_SEARCH_TOP_K - 1u].distance &&
+         candidate.seq > top[IVF8_SEARCH_TOP_K - 1u].seq)) {
+        return;
+    }
     for (uint32_t pos = 0; pos < IVF8_SEARCH_TOP_K; pos++) {
         if (candidate.distance > top[pos].distance ||
             (candidate.distance == top[pos].distance && candidate.seq > top[pos].seq)) {
@@ -127,6 +145,12 @@ void ivf8_top5_insert(Ivf8Neighbor top[IVF8_SEARCH_TOP_K], Ivf8Neighbor candidat
         top[pos] = candidate;
         return;
     }
+}
+
+static bool ivf8_top5_accepts(const Ivf8Neighbor top[IVF8_SEARCH_TOP_K], uint64_t distance, uint32_t seq) {
+    return distance < top[IVF8_SEARCH_TOP_K - 1u].distance ||
+           (distance == top[IVF8_SEARCH_TOP_K - 1u].distance &&
+            seq < top[IVF8_SEARCH_TOP_K - 1u].seq);
 }
 
 uint8_t ivf8_top5_fraud_count(const Ivf8Neighbor top[IVF8_SEARCH_TOP_K]) {
@@ -206,11 +230,61 @@ static uint32_t ivf8_select_probes_avx2(const Ivf8Index *idx,
     return probe_count;
 }
 
+static uint32_t select_probes_profiled(const Ivf8Index *idx,
+                                       const int16_t query[IVF8_INDEX_DIMS],
+                                       uint32_t probe_count,
+                                       Ivf8SearchImpl impl,
+                                       Ivf8Probe probes[IVF8_SEARCH_MAX_PROBES],
+                                       Ivf8SearchProfile *profile) {
+    if (idx == NULL || query == NULL || probes == NULL || probe_count == 0 || idx->k > IVF8_PRODUCTION_K) {
+        return 0;
+    }
+    if (probe_count > idx->k) {
+        probe_count = idx->k;
+    }
+    if (probe_count > IVF8_SEARCH_MAX_PROBES) {
+        probe_count = IVF8_SEARCH_MAX_PROBES;
+    }
+
+    uint64_t centroid_distances[IVF8_PRODUCTION_K];
+    uint64_t start = search_now_ns();
+    if (impl == IVF8_SEARCH_IMPL_AVX2) {
+        uint32_t cluster = 0;
+        for (; cluster + IVF8_INDEX_LANES <= idx->k; cluster += IVF8_INDEX_LANES) {
+            ivf8_centroid_distances_avx2(idx, query, cluster, centroid_distances + cluster);
+        }
+        for (; cluster < idx->k; cluster++) {
+            centroid_distances[cluster] = ivf8_centroid_distance(idx, query, cluster);
+        }
+    } else {
+        for (uint32_t cluster = 0; cluster < idx->k; cluster++) {
+            centroid_distances[cluster] = ivf8_centroid_distance(idx, query, cluster);
+        }
+    }
+    profile->centroid_ns += search_now_ns() - start;
+
+    start = search_now_ns();
+    for (uint32_t i = 0; i < IVF8_SEARCH_MAX_PROBES; i++) {
+        probes[i].cluster = UINT32_MAX;
+        probes[i].distance = UINT64_MAX;
+    }
+    for (uint32_t cluster = 0; cluster < idx->k; cluster++) {
+        Ivf8Probe candidate = {
+            .cluster = cluster,
+            .distance = centroid_distances[cluster],
+        };
+        insert_probe(probes, probe_count, candidate);
+    }
+    profile->probe_select_ns += search_now_ns() - start;
+    return probe_count;
+}
+
 static uint32_t scan_cluster(const Ivf8Index *idx,
                              const int16_t query[IVF8_INDEX_DIMS],
                              uint32_t cluster,
                              uint32_t max_candidates,
                              Ivf8SearchStats *stats,
+                             Ivf8SearchProfile *profile,
                              Ivf8Neighbor top[IVF8_SEARCH_TOP_K],
                              uint32_t *seq) {
     uint32_t remaining = idx->counts[cluster];
@@ -228,14 +302,22 @@ static uint32_t scan_cluster(const Ivf8Index *idx,
         if (remaining < end_lane) {
             end_lane = remaining;
         }
+        stats->blocks_scanned++;
         uint32_t label_base = block * IVF8_INDEX_LANES;
         for (uint32_t lane = 0; lane < end_lane && stats->candidates_scanned < max_candidates; lane++) {
-            Ivf8Neighbor candidate = {
-                .distance = ivf8_block_lane_distance(idx->block_data, block, lane, query),
-                .fraud = idx->labels[label_base + lane] != 0 ? 1u : 0u,
-                .seq = *seq,
-            };
-            ivf8_top5_insert(top, candidate);
+            uint64_t distance = ivf8_block_lane_distance(idx->block_data, block, lane, query);
+            if (ivf8_top5_accepts(top, distance, *seq)) {
+                Ivf8Neighbor candidate = {
+                    .distance = distance,
+                    .fraud = idx->labels[label_base + lane] != 0 ? 1u : 0u,
+                    .seq = *seq,
+                };
+                uint64_t top5_start = profile != NULL ? search_now_ns() : 0u;
+                ivf8_top5_insert(top, candidate);
+                if (profile != NULL) {
+                    profile->top5_ns += search_now_ns() - top5_start;
+                }
+            }
             (*seq)++;
             stats->candidates_scanned++;
             scanned++;
@@ -250,6 +332,7 @@ static uint32_t scan_cluster_avx2(const Ivf8Index *idx,
                                   uint32_t cluster,
                                   uint32_t max_candidates,
                                   Ivf8SearchStats *stats,
+                                  Ivf8SearchProfile *profile,
                                   Ivf8Neighbor top[IVF8_SEARCH_TOP_K],
                                   uint32_t *seq) {
     uint32_t remaining = idx->counts[cluster];
@@ -268,15 +351,22 @@ static uint32_t scan_cluster_avx2(const Ivf8Index *idx,
         if (remaining < end_lane) {
             end_lane = remaining;
         }
+        stats->blocks_scanned++;
         ivf8_block_distances_avx2(idx->block_data, block, query, distances);
         uint32_t label_base = block * IVF8_INDEX_LANES;
         for (uint32_t lane = 0; lane < end_lane && stats->candidates_scanned < max_candidates; lane++) {
-            Ivf8Neighbor candidate = {
-                .distance = distances[lane],
-                .fraud = idx->labels[label_base + lane] != 0 ? 1u : 0u,
-                .seq = *seq,
-            };
-            ivf8_top5_insert(top, candidate);
+            if (ivf8_top5_accepts(top, distances[lane], *seq)) {
+                Ivf8Neighbor candidate = {
+                    .distance = distances[lane],
+                    .fraud = idx->labels[label_base + lane] != 0 ? 1u : 0u,
+                    .seq = *seq,
+                };
+                uint64_t top5_start = profile != NULL ? search_now_ns() : 0u;
+                ivf8_top5_insert(top, candidate);
+                if (profile != NULL) {
+                    profile->top5_ns += search_now_ns() - top5_start;
+                }
+            }
             (*seq)++;
             stats->candidates_scanned++;
             scanned++;
@@ -292,6 +382,7 @@ static void scan_probe(const Ivf8Index *idx,
                        uint32_t max_candidates,
                        Ivf8SearchImpl impl,
                        Ivf8SearchStats *stats,
+                       Ivf8SearchProfile *profile,
                        Ivf8Neighbor top[IVF8_SEARCH_TOP_K],
                        uint32_t *seq) {
     uint32_t cluster = probe.cluster;
@@ -312,27 +403,38 @@ static void scan_probe(const Ivf8Index *idx,
     }
 
     stats->clusters_scanned++;
+    if (idx->counts[cluster] > stats->largest_scanned_cluster_candidates) {
+        stats->largest_scanned_cluster_candidates = idx->counts[cluster];
+    }
+    uint32_t cluster_blocks = idx->offsets[cluster + 1u] - idx->offsets[cluster];
+    if (cluster_blocks > stats->largest_scanned_cluster_blocks) {
+        stats->largest_scanned_cluster_blocks = cluster_blocks;
+    }
     if (impl == IVF8_SEARCH_IMPL_AVX2) {
-        (void)scan_cluster_avx2(idx, query, cluster, max_candidates, stats, top, seq);
+        (void)scan_cluster_avx2(idx, query, cluster, max_candidates, stats, profile, top, seq);
     } else {
-        (void)scan_cluster(idx, query, cluster, max_candidates, stats, top, seq);
+        (void)scan_cluster(idx, query, cluster, max_candidates, stats, profile, top, seq);
     }
 }
 
-Ivf8SearchResult ivf8_search(const Ivf8Index *idx,
-                              const int16_t query[IVF8_INDEX_DIMS],
-                              const Ivf8SearchConfig *cfg) {
+static Ivf8SearchResult ivf8_search_internal(const Ivf8Index *idx,
+                                             const int16_t query[IVF8_INDEX_DIMS],
+                                             const Ivf8SearchConfig *cfg,
+                                             bool profiled) {
     Ivf8SearchResult result;
     memset(&result, 0, sizeof(result));
     if (idx == NULL || query == NULL || idx->k == 0) {
         return result;
     }
 
+    uint64_t total_start = profiled ? search_now_ns() : 0u;
     uint32_t probe_count = normalized_probe_count(idx, cfg);
     uint32_t max_candidates = normalized_max_candidates(cfg);
     Ivf8SearchImpl impl = normalized_impl(cfg);
     Ivf8Probe probes[IVF8_SEARCH_MAX_PROBES];
-    if (impl == IVF8_SEARCH_IMPL_AVX2) {
+    if (profiled) {
+        probe_count = select_probes_profiled(idx, query, probe_count, impl, probes, &result.profile);
+    } else if (impl == IVF8_SEARCH_IMPL_AVX2) {
         probe_count = ivf8_select_probes_avx2(idx, query, probe_count, probes);
     } else {
         probe_count = ivf8_select_probes(idx, query, probe_count, probes);
@@ -343,12 +445,31 @@ Ivf8SearchResult ivf8_search(const Ivf8Index *idx,
 
     result.stats.centroids_scored = idx->k;
     uint32_t seq = 0;
+    uint64_t scan_start = profiled ? search_now_ns() : 0u;
     for (uint32_t probe = 0; probe < probe_count && result.stats.candidates_scanned < max_candidates; probe++) {
-        scan_probe(idx, query, probes[probe], max_candidates, impl, &result.stats, top, &seq);
+        scan_probe(idx, query, probes[probe], max_candidates, impl, &result.stats, profiled ? &result.profile : NULL, top, &seq);
+    }
+    if (profiled) {
+        result.profile.scan_ns = search_now_ns() - scan_start;
     }
 
     result.fraud_count = ivf8_top5_fraud_count(top);
+    if (profiled) {
+        result.profile.total_ns = search_now_ns() - total_start;
+    }
     return result;
+}
+
+Ivf8SearchResult ivf8_search(const Ivf8Index *idx,
+                              const int16_t query[IVF8_INDEX_DIMS],
+                              const Ivf8SearchConfig *cfg) {
+    return ivf8_search_internal(idx, query, cfg, false);
+}
+
+Ivf8SearchResult ivf8_search_profiled(const Ivf8Index *idx,
+                                       const int16_t query[IVF8_INDEX_DIMS],
+                                       const Ivf8SearchConfig *cfg) {
+    return ivf8_search_internal(idx, query, cfg, true);
 }
 
 uint8_t ivf8_search_fraud_count(const Ivf8Index *idx,
