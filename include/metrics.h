@@ -23,6 +23,8 @@ typedef struct {
     atomic_uint_fast64_t fraud_count;
     atomic_uint_fast64_t debug_count;
     atomic_uint_fast64_t vectorize_failures;
+    atomic_uint_fast64_t kdtree_repair_count;
+    atomic_uint_fast64_t kdtree_repair_skipped;
     atomic_uint_fast64_t read_errors;
     atomic_uint_fast64_t write_errors;
     atomic_uint_fast64_t malformed_requests;

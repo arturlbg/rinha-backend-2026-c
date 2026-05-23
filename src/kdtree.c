@@ -1,10 +1,14 @@
 #include "kdtree.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #define KDTREE_FILE_MAGIC "RKDTREE1"
 #define KDTREE_FILE_VERSION 1u
@@ -323,7 +327,11 @@ void kdtree_free(KdTree *tree) {
     if (tree == NULL) {
         return;
     }
-    free(tree->nodes);
+    if (tree->node_map != NULL && tree->node_map_size != 0) {
+        (void)munmap(tree->node_map, tree->node_map_size);
+    } else {
+        free(tree->nodes);
+    }
     free(tree->owned_vectors);
     free(tree->owned_labels);
     memset(tree, 0, sizeof(*tree));
@@ -509,5 +517,65 @@ int kdtree_load_nodes_for_ivf8(KdTree *tree, const Ivf8Index *index, const char 
     tree->root = header.root;
     tree->node_count = header.node_count;
     tree->nodes = nodes;
+    return 0;
+}
+
+int kdtree_mmap_nodes_for_ivf8(KdTree *tree, const Ivf8Index *index, const char *path) {
+    if (tree == NULL || index == NULL || path == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        return -1;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) {
+        int saved = errno;
+        close(fd);
+        errno = saved == 0 ? EINVAL : saved;
+        return -1;
+    }
+    size_t file_size = (size_t)st.st_size;
+    void *map = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    int saved_errno = errno;
+    close(fd);
+    if (map == MAP_FAILED) {
+        errno = saved_errno;
+        return -1;
+    }
+
+    if (file_size < sizeof(KdTreeFileHeader)) {
+        (void)munmap(map, file_size);
+        errno = EINVAL;
+        return -1;
+    }
+    const KdTreeFileHeader *header = (const KdTreeFileHeader *)map;
+    uint64_t expected_size = sizeof(*header) + (uint64_t)header->node_count * sizeof(KdTreeNode);
+    if (memcmp(header->magic, KDTREE_FILE_MAGIC, sizeof(header->magic)) != 0 ||
+        header->version != KDTREE_FILE_VERSION ||
+        header->dims != IVF8_INDEX_DIMS ||
+        header->node_size != sizeof(KdTreeNode) ||
+        header->count != index->n ||
+        header->node_count != index->n ||
+        header->nodes_offset != sizeof(*header) ||
+        header->total_size != expected_size ||
+        expected_size != (uint64_t)file_size) {
+        (void)munmap(map, file_size);
+        errno = EINVAL;
+        return -1;
+    }
+
+    memset(tree, 0, sizeof(*tree));
+    tree->source_kind = KDTREE_SOURCE_IVF8;
+    tree->index = index;
+    tree->count = header->count;
+    tree->root = header->root;
+    tree->node_count = header->node_count;
+    tree->nodes = (KdTreeNode *)((uint8_t *)map + header->nodes_offset);
+    tree->node_map = map;
+    tree->node_map_size = file_size;
     return 0;
 }

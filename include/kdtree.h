@@ -35,6 +35,8 @@ typedef struct {
     uint32_t root;
     uint32_t node_count;
     KdTreeNode *nodes;
+    void *node_map;
+    size_t node_map_size;
 } KdTree;
 
 typedef struct {
@@ -81,5 +83,6 @@ uint8_t kdtree_search_fraud_count(const KdTree *tree,
 
 int kdtree_save_nodes(const KdTree *tree, const char *path);
 int kdtree_load_nodes_for_ivf8(KdTree *tree, const Ivf8Index *index, const char *path);
+int kdtree_mmap_nodes_for_ivf8(KdTree *tree, const Ivf8Index *index, const char *path);
 
 #endif

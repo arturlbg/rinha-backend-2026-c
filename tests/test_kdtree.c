@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 static int failures = 0;
 
@@ -114,11 +115,32 @@ static void test_approx_limit(void) {
     kdtree_free(&tree);
 }
 
+static void test_mmap_real_tree_if_mounted(void) {
+    const char *tree_path = "/out/kdtree.bin";
+    const char *index_path = "/data/index.bin";
+    if (access(tree_path, R_OK) != 0 || access(index_path, R_OK) != 0) {
+        return;
+    }
+
+    Ivf8Index index;
+    char err[256];
+    CHECK(ivf8_index_open(index_path, &index, err, sizeof(err)) == 0);
+    KdTree tree;
+    CHECK(kdtree_mmap_nodes_for_ivf8(&tree, &index, tree_path) == 0);
+    CHECK(tree.node_count == index.n);
+    CHECK(tree.node_map != NULL);
+    CHECK(tree.node_map_size > 0);
+    CHECK(kdtree_runtime_memory_bytes(&tree) == (size_t)index.n * sizeof(KdTreeNode));
+    kdtree_free(&tree);
+    ivf8_index_close(&index);
+}
+
 int main(void) {
     test_distance();
     test_top5_ordering();
     test_kdtree_equals_bruteforce();
     test_approx_limit();
+    test_mmap_real_tree_if_mounted();
 
     if (failures != 0) {
         fprintf(stderr, "%d test failure(s)\n", failures);

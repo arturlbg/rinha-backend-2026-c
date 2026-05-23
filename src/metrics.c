@@ -172,6 +172,8 @@ size_t metrics_write_text(const RinhaMetrics *metrics,
     used = appendf(out, cap, used, "fraud_count=%llu\n", (unsigned long long)load_counter(&metrics->fraud_count));
     used = appendf(out, cap, used, "debug_count=%llu\n", (unsigned long long)load_counter(&metrics->debug_count));
     used = appendf(out, cap, used, "vectorize_failures=%llu\n", (unsigned long long)load_counter(&metrics->vectorize_failures));
+    used = appendf(out, cap, used, "kdtree_repair_count=%llu\n", (unsigned long long)load_counter(&metrics->kdtree_repair_count));
+    used = appendf(out, cap, used, "kdtree_repair_skipped=%llu\n", (unsigned long long)load_counter(&metrics->kdtree_repair_skipped));
     used = appendf(out, cap, used, "read_errors=%llu\n", (unsigned long long)load_counter(&metrics->read_errors));
     used = appendf(out, cap, used, "write_errors=%llu\n", (unsigned long long)load_counter(&metrics->write_errors));
     used = appendf(out, cap, used, "malformed_requests=%llu\n", (unsigned long long)load_counter(&metrics->malformed_requests));

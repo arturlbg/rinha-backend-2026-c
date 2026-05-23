@@ -1,6 +1,8 @@
 #include "config.h"
 #include "fdpass.h"
 #include "ivf8_index.h"
+#include "kdtree.h"
+#include "kdtree_repair.h"
 #include "metrics.h"
 #include "raw_http.h"
 
@@ -59,6 +61,25 @@ static index_warmup_mode parse_index_warmup_mode(const char *mode) {
         return INDEX_WARMUP_SEARCH;
     }
     fprintf(stderr, "invalid RINHA_INDEX_WARMUP=%s\n", mode);
+    exit(1);
+}
+
+static bool env_bool(const char *name, bool fallback) {
+    const char *raw = getenv(name);
+    if (raw == NULL || raw[0] == '\0') {
+        return fallback;
+    }
+    if (metrics_parse_enabled(raw)) {
+        return true;
+    }
+    if (strcmp(raw, "0") == 0 ||
+        strcmp(raw, "false") == 0 ||
+        strcmp(raw, "FALSE") == 0 ||
+        strcmp(raw, "no") == 0 ||
+        strcmp(raw, "off") == 0) {
+        return false;
+    }
+    fprintf(stderr, "invalid %s=%s\n", name, raw);
     exit(1);
 }
 
@@ -167,17 +188,52 @@ int main(void) {
         return 1;
     }
 
+    bool kdtree_repair_enabled = env_bool("RINHA_KDTREE_REPAIR_ENABLED", false);
+    const char *kdtree_path = getenv("RINHA_KDTREE_PATH");
+    if (kdtree_path == NULL || kdtree_path[0] == '\0') {
+        kdtree_path = RINHA_DEFAULT_KDTREE_PATH;
+    }
+    const char *kdtree_policy_text = getenv("RINHA_KDTREE_REPAIR_POLICY");
+    if (kdtree_policy_text == NULL || kdtree_policy_text[0] == '\0') {
+        kdtree_policy_text = RINHA_DEFAULT_KDTREE_REPAIR_POLICY;
+    }
+    KdTreeRepairPolicy kdtree_policy;
+    if (!kdtree_repair_policy_from_string(kdtree_policy_text, &kdtree_policy)) {
+        fprintf(stderr, "invalid RINHA_KDTREE_REPAIR_POLICY=%s\n", kdtree_policy_text);
+        ivf8_index_close(&index);
+        return 1;
+    }
+    KdTree kdtree;
+    memset(&kdtree, 0, sizeof(kdtree));
+    kdtree.root = KDTREE_INVALID_NODE;
+    if (kdtree_repair_enabled) {
+        if (kdtree_mmap_nodes_for_ivf8(&kdtree, &index, kdtree_path) != 0) {
+            fprintf(stderr, "load KD-tree %s: %s\n", kdtree_path, strerror(errno));
+            ivf8_index_close(&index);
+            return 1;
+        }
+        fprintf(stderr,
+                "kdtree_repair enabled=1 policy=%s path=%s nodes=%u memory_mib=%.2f\n",
+                kdtree_repair_policy_name(kdtree_policy),
+                kdtree_path,
+                kdtree.node_count,
+                (double)kdtree_runtime_memory_bytes(&kdtree) / 1048576.0);
+    }
+
     index_warmup_mode warmup_mode = parse_index_warmup_mode(getenv("RINHA_INDEX_WARMUP"));
     uint32_t warmup_queries = env_u32("RINHA_INDEX_WARMUP_QUERIES", RINHA_DEFAULT_INDEX_WARMUP_QUERIES);
     bool use_madvise = metrics_parse_enabled(getenv("RINHA_INDEX_MADVISE"));
 
     raw_http_app app = {
         .index = &index,
+        .kdtree = kdtree_repair_enabled ? &kdtree : NULL,
         .search_config = {
             .max_candidates = env_u32("RINHA_IVF8_MAX_CANDIDATES", RINHA_DEFAULT_IVF8_MAX_CANDIDATES),
             .probes = env_u32("RINHA_IVF8_PROBES", RINHA_DEFAULT_IVF8_PROBES),
             .impl = search_impl,
         },
+        .kdtree_repair_enabled = kdtree_repair_enabled,
+        .kdtree_repair_policy = kdtree_policy,
         .metrics = &metrics,
         .listen_mode = listen_mode,
         .exec_mode = exec_mode_text,
@@ -200,15 +256,18 @@ int main(void) {
         serve_result = fdpass_serve(unix_socket, &app, &fdpass_opts);
     } else {
         fprintf(stderr, "invalid RINHA_LISTEN_MODE=%s\n", listen_mode);
+        kdtree_free(&kdtree);
         ivf8_index_close(&index);
         return 1;
     }
 
     if (serve_result != 0) {
         perror("serve");
+        kdtree_free(&kdtree);
         ivf8_index_close(&index);
         return 1;
     }
+    kdtree_free(&kdtree);
     ivf8_index_close(&index);
     return 0;
 }

@@ -249,7 +249,21 @@ static const http_response *route_request(const parsed_request *request, const c
             metrics_observe(&metrics->vectorize, metrics_now_ns() - start);
         }
         start = metrics != NULL ? metrics_now_ns() : 0u;
-        uint8_t fraud_count = ivf8_search_fraud_count(app->index, query, &app->search_config);
+        uint8_t fraud_count;
+        if (app->kdtree_repair_enabled && app->kdtree != NULL) {
+            Ivf8SearchTraceResult trace = ivf8_search_trace(app->index, query, &app->search_config);
+            fraud_count = trace.result.fraud_count;
+            if (kdtree_repair_should_run(app->kdtree_repair_policy, &trace)) {
+                if (metrics != NULL) {
+                    metrics_inc(&metrics->kdtree_repair_count);
+                }
+                fraud_count = kdtree_search_fraud_count(app->kdtree, query, NULL);
+            } else if (metrics != NULL) {
+                metrics_inc(&metrics->kdtree_repair_skipped);
+            }
+        } else {
+            fraud_count = ivf8_search_fraud_count(app->index, query, &app->search_config);
+        }
         if (metrics != NULL) {
             metrics_observe(&metrics->search, metrics_now_ns() - start);
         }

@@ -4,6 +4,7 @@
 #include "ivf8_index.h"
 #include "ivf8_search.h"
 #include "kdtree.h"
+#include "kdtree_repair.h"
 
 #include <errno.h>
 #include <math.h>
@@ -13,7 +14,7 @@
 #include <string.h>
 #include <time.h>
 
-#define DEFAULT_WORST_THRESHOLD 4000000ull
+#define DEFAULT_WORST_THRESHOLD KDTREE_REPAIR_BOUNDARY23_FAR45_THRESHOLD
 #define DEFAULT_MARGIN_THRESHOLD 250000ull
 #define DEFAULT_ASSUMED_P99_MS 13.64
 #define MAX_PRINTED_WRONG 20

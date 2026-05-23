@@ -30,6 +30,9 @@ services:
       RINHA_LISTEN_MODE: "fdpass"
       RINHA_UNIX_SOCKET: "/sockets/api1.ctrl"
       RINHA_INDEX_PATH: "/app/resources/index.bin"
+      RINHA_KDTREE_PATH: "/app/resources/kdtree.bin"
+      RINHA_KDTREE_REPAIR_ENABLED: "${RINHA_KDTREE_REPAIR_ENABLED:-false}"
+      RINHA_KDTREE_REPAIR_POLICY: "${RINHA_KDTREE_REPAIR_POLICY:-boundary23_far45}"
       RINHA_INDEX_WARMUP: "${RINHA_INDEX_WARMUP:-off}"
       RINHA_INDEX_WARMUP_QUERIES: "${RINHA_INDEX_WARMUP_QUERIES:-2048}"
       RINHA_INDEX_MADVISE: "${RINHA_INDEX_MADVISE:-false}"
@@ -42,7 +45,8 @@ services:
       RINHA_FD_QUEUE_SIZE: "${RINHA_FD_QUEUE_SIZE:-1024}"
     volumes:
       - sockets:/sockets
-      - ../rinha-2026-go/release:/app/resources:ro
+      - ../rinha-2026-go/release/index.bin:/app/resources/index.bin:ro
+      - ./tmp/kdtree/kdtree.bin:/app/resources/kdtree.bin:ro
     cpus: "0.475"
     mem_limit: 167m
     networks:
@@ -61,6 +65,9 @@ services:
       RINHA_LISTEN_MODE: "fdpass"
       RINHA_UNIX_SOCKET: "/sockets/api2.ctrl"
       RINHA_INDEX_PATH: "/app/resources/index.bin"
+      RINHA_KDTREE_PATH: "/app/resources/kdtree.bin"
+      RINHA_KDTREE_REPAIR_ENABLED: "${RINHA_KDTREE_REPAIR_ENABLED:-false}"
+      RINHA_KDTREE_REPAIR_POLICY: "${RINHA_KDTREE_REPAIR_POLICY:-boundary23_far45}"
       RINHA_INDEX_WARMUP: "${RINHA_INDEX_WARMUP:-off}"
       RINHA_INDEX_WARMUP_QUERIES: "${RINHA_INDEX_WARMUP_QUERIES:-2048}"
       RINHA_INDEX_MADVISE: "${RINHA_INDEX_MADVISE:-false}"
@@ -73,7 +80,8 @@ services:
       RINHA_FD_QUEUE_SIZE: "${RINHA_FD_QUEUE_SIZE:-1024}"
     volumes:
       - sockets:/sockets
-      - ../rinha-2026-go/release:/app/resources:ro
+      - ../rinha-2026-go/release/index.bin:/app/resources/index.bin:ro
+      - ./tmp/kdtree/kdtree.bin:/app/resources/kdtree.bin:ro
     cpus: "0.475"
     mem_limit: 167m
     networks:

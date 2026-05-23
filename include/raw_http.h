@@ -9,6 +9,8 @@
 #include "config.h"
 #include "ivf8_index.h"
 #include "ivf8_search.h"
+#include "kdtree.h"
+#include "kdtree_repair.h"
 #include "metrics.h"
 
 #define RAW_HTTP_CONN_WANT_READ 1u
@@ -36,7 +38,10 @@ typedef struct {
 
 typedef struct {
     const Ivf8Index *index;
+    const KdTree *kdtree;
     Ivf8SearchConfig search_config;
+    bool kdtree_repair_enabled;
+    KdTreeRepairPolicy kdtree_repair_policy;
     RinhaMetrics *metrics;
     const char *listen_mode;
     const char *exec_mode;
