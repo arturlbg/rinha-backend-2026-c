@@ -9,6 +9,7 @@
 #include "config.h"
 #include "ivf8_index.h"
 #include "ivf8_search.h"
+#include "kdprimary.h"
 #include "kdtree.h"
 #include "kdtree_repair.h"
 #include "metrics.h"
@@ -31,6 +32,11 @@ typedef enum {
     RAW_HTTP_PATH_DEBUG_INFO = 3
 } raw_http_path;
 
+typedef enum {
+    RAW_HTTP_SEARCH_IVF8 = 0,
+    RAW_HTTP_SEARCH_KDPRIMARY = 1
+} raw_http_search_mode;
+
 typedef struct {
     raw_http_method method;
     raw_http_path path;
@@ -38,7 +44,9 @@ typedef struct {
 
 typedef struct {
     const Ivf8Index *index;
+    const KdPrimaryIndex *kdprimary;
     const KdTree *kdtree;
+    raw_http_search_mode search_mode;
     Ivf8SearchConfig search_config;
     bool kdtree_repair_enabled;
     KdTreeRepairPolicy kdtree_repair_policy;
@@ -74,6 +82,9 @@ uint32_t raw_http_conn_on_writable(raw_http_conn *conn);
 bool raw_http_conn_wants_write(const raw_http_conn *conn);
 void raw_http_conn_close(raw_http_conn *conn);
 
+bool raw_http_search_mode_from_string(const char *value,
+                                      raw_http_search_mode *mode,
+                                      Ivf8SearchImpl *ivf8_impl);
 ssize_t raw_http_index_header_end(const char *buffer, size_t len);
 int raw_http_parse_content_length(const char *header, size_t len, size_t *content_length, bool *present);
 int raw_http_parse_request_line(const char *header, size_t len, raw_http_request_line *out);

@@ -263,6 +263,24 @@ static void test_request_line(void) {
     CHECK(line.path == RAW_HTTP_PATH_DEBUG_INFO);
 }
 
+static void test_search_mode_parse(void) {
+    raw_http_search_mode mode;
+    Ivf8SearchImpl impl;
+
+    CHECK(raw_http_search_mode_from_string("scalar", &mode, &impl));
+    CHECK(mode == RAW_HTTP_SEARCH_IVF8);
+    CHECK(impl == IVF8_SEARCH_IMPL_SCALAR);
+
+    CHECK(raw_http_search_mode_from_string("avx2", &mode, &impl));
+    CHECK(mode == RAW_HTTP_SEARCH_IVF8);
+    CHECK(impl == IVF8_SEARCH_IMPL_AVX2);
+
+    CHECK(raw_http_search_mode_from_string("kdprimary", &mode, &impl));
+    CHECK(mode == RAW_HTTP_SEARCH_KDPRIMARY);
+
+    CHECK(!raw_http_search_mode_from_string("bogus", &mode, &impl));
+}
+
 static void test_single_request(void) {
     char req[256];
     size_t req_len = make_request(req, sizeof(req), "GET", "/ready", "");
@@ -485,6 +503,43 @@ static void test_valid_body_uses_search_response(void) {
     CHECK(contains_text(out, out_len, "{\"approved\":false,\"fraud_score\":0.6}"));
 }
 
+static void test_valid_body_uses_kdprimary_response(void) {
+    int16_t query[FASTVECTOR_DIMENSIONS];
+    CHECK(fastvector_vectorize(valid_payload(), strlen(valid_payload()), query));
+
+    int16_t vectors[5 * IVF8_INDEX_DIMS];
+    uint8_t labels[5] = {1, 1, 1, 0, 0};
+    for (uint32_t point = 0; point < 5; point++) {
+        memcpy(vectors + (size_t)point * IVF8_INDEX_DIMS, query, IVF8_INDEX_DIMS * sizeof(int16_t));
+        vectors[(size_t)point * IVF8_INDEX_DIMS] += (int16_t)point;
+    }
+
+    char err[256];
+    KdPrimaryBuild build;
+    CHECK(kdprimary_build_from_points(&build, vectors, labels, 5, 4, err, sizeof(err)) == 0);
+    KdPrimaryIndex kdprimary = {
+        .count = build.count,
+        .node_count = build.node_count,
+        .root = build.root,
+        .leaf_size = build.leaf_size,
+        .nodes = build.nodes,
+        .vectors = build.vectors,
+        .labels = build.labels,
+    };
+    raw_http_app app = {
+        .kdprimary = &kdprimary,
+        .search_mode = RAW_HTTP_SEARCH_KDPRIMARY,
+    };
+
+    char req[1024];
+    size_t req_len = make_request(req, sizeof(req), "POST", "/fraud-score", valid_payload());
+    test_chunk chunks[] = {{req, req_len}};
+    char out[2048];
+    size_t out_len = run_connection_with_app(chunks, 1, out, sizeof(out), &app);
+    CHECK(contains_text(out, out_len, "{\"approved\":false,\"fraud_score\":0.6}"));
+    kdprimary_build_free(&build);
+}
+
 static void test_metrics_counts_and_debug(void) {
     RinhaMetrics metrics;
     metrics_init(&metrics, true);
@@ -531,6 +586,7 @@ int main(void) {
     test_header_end();
     test_content_length();
     test_request_line();
+    test_search_mode_parse();
     test_single_request();
     test_pipelined_requests();
     test_fragmented_header();
@@ -543,6 +599,7 @@ int main(void) {
     test_fraud_response_mapping();
     test_invalid_body_returns_safe_approved();
     test_valid_body_uses_search_response();
+    test_valid_body_uses_kdprimary_response();
     test_metrics_counts_and_debug();
 
     if (failures != 0) {

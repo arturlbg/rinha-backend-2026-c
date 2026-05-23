@@ -83,6 +83,28 @@ static bool ascii_equal_fold_literal(const char *value, size_t value_len, const 
     return true;
 }
 
+bool raw_http_search_mode_from_string(const char *value,
+                                      raw_http_search_mode *mode,
+                                      Ivf8SearchImpl *ivf8_impl) {
+    if (mode == NULL || ivf8_impl == NULL) {
+        return false;
+    }
+    if (value != NULL && strcmp(value, "kdprimary") == 0) {
+        *mode = RAW_HTTP_SEARCH_KDPRIMARY;
+        *ivf8_impl = IVF8_SEARCH_IMPL_SCALAR;
+        return true;
+    }
+
+    bool ok = false;
+    Ivf8SearchImpl parsed = ivf8_search_impl_from_string(value, &ok);
+    if (!ok) {
+        return false;
+    }
+    *mode = RAW_HTTP_SEARCH_IVF8;
+    *ivf8_impl = parsed;
+    return true;
+}
+
 ssize_t raw_http_index_header_end(const char *buffer, size_t len) {
     if (len < 4) {
         return -1;
@@ -233,7 +255,9 @@ static const http_response *route_request(const parsed_request *request, const c
         if (!request->content_length_present) {
             return &RESPONSE_BAD_REQUEST;
         }
-        if (app == NULL || app->index == NULL || body == NULL) {
+        if (app == NULL || body == NULL ||
+            (app->search_mode == RAW_HTTP_SEARCH_KDPRIMARY && app->kdprimary == NULL) ||
+            (app->search_mode == RAW_HTTP_SEARCH_IVF8 && app->index == NULL)) {
             return &RESPONSE_FRAUD_APPROVED;
         }
         int16_t query[FASTVECTOR_DIMENSIONS];
@@ -250,7 +274,9 @@ static const http_response *route_request(const parsed_request *request, const c
         }
         start = metrics != NULL ? metrics_now_ns() : 0u;
         uint8_t fraud_count;
-        if (app->kdtree_repair_enabled && app->kdtree != NULL) {
+        if (app->search_mode == RAW_HTTP_SEARCH_KDPRIMARY) {
+            fraud_count = kdprimary_search_fraud_count(app->kdprimary, query);
+        } else if (app->kdtree_repair_enabled && app->kdtree != NULL) {
             Ivf8SearchTraceResult trace = ivf8_search_trace(app->index, query, &app->search_config);
             fraud_count = trace.result.fraud_count;
             if (kdtree_repair_should_run(app->kdtree_repair_policy, &trace)) {

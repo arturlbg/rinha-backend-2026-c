@@ -23,13 +23,15 @@ services:
       dockerfile: Dockerfile
       args:
         MAKE_TARGET: "${RINHA_MAKE_TARGET:-all}"
-    image: rinha-c-phase8g:local
+    image: rinha-c-phase8i:local
     platform: linux/amd64
     user: "0:0"
     environment:
       RINHA_LISTEN_MODE: "fdpass"
       RINHA_UNIX_SOCKET: "/sockets/api1.ctrl"
       RINHA_INDEX_PATH: "/app/resources/index.bin"
+      RINHA_KDPRIMARY_PATH: "/app/resources/kdprimary.bin"
+      RINHA_KDPRIMARY_TOUCH: "${RINHA_KDPRIMARY_TOUCH:-false}"
       RINHA_KDTREE_PATH: "/app/resources/kdtree.bin"
       RINHA_KDTREE_REPAIR_ENABLED: "${RINHA_KDTREE_REPAIR_ENABLED:-false}"
       RINHA_KDTREE_REPAIR_POLICY: "${RINHA_KDTREE_REPAIR_POLICY:-boundary23_far45}"
@@ -46,6 +48,7 @@ services:
     volumes:
       - sockets:/sockets
       - ../rinha-2026-go/release/index.bin:/app/resources/index.bin:ro
+      - ./tmp/kdprimary/kdprimary-l32.bin:/app/resources/kdprimary.bin:ro
       - ./tmp/kdtree/kdtree.bin:/app/resources/kdtree.bin:ro
     cpus: "0.475"
     mem_limit: 167m
@@ -58,13 +61,15 @@ services:
       dockerfile: Dockerfile
       args:
         MAKE_TARGET: "${RINHA_MAKE_TARGET:-all}"
-    image: rinha-c-phase8g:local
+    image: rinha-c-phase8i:local
     platform: linux/amd64
     user: "0:0"
     environment:
       RINHA_LISTEN_MODE: "fdpass"
       RINHA_UNIX_SOCKET: "/sockets/api2.ctrl"
       RINHA_INDEX_PATH: "/app/resources/index.bin"
+      RINHA_KDPRIMARY_PATH: "/app/resources/kdprimary.bin"
+      RINHA_KDPRIMARY_TOUCH: "${RINHA_KDPRIMARY_TOUCH:-false}"
       RINHA_KDTREE_PATH: "/app/resources/kdtree.bin"
       RINHA_KDTREE_REPAIR_ENABLED: "${RINHA_KDTREE_REPAIR_ENABLED:-false}"
       RINHA_KDTREE_REPAIR_POLICY: "${RINHA_KDTREE_REPAIR_POLICY:-boundary23_far45}"
@@ -81,6 +86,7 @@ services:
     volumes:
       - sockets:/sockets
       - ../rinha-2026-go/release/index.bin:/app/resources/index.bin:ro
+      - ./tmp/kdprimary/kdprimary-l32.bin:/app/resources/kdprimary.bin:ro
       - ./tmp/kdtree/kdtree.bin:/app/resources/kdtree.bin:ro
     cpus: "0.475"
     mem_limit: 167m

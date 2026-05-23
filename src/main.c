@@ -1,6 +1,7 @@
 #include "config.h"
 #include "fdpass.h"
 #include "ivf8_index.h"
+#include "kdprimary.h"
 #include "kdtree.h"
 #include "kdtree_repair.h"
 #include "metrics.h"
@@ -169,26 +170,66 @@ int main(void) {
     if (search_impl_text == NULL || search_impl_text[0] == '\0') {
         search_impl_text = RINHA_DEFAULT_SEARCH_IMPL;
     }
-    bool search_impl_ok = false;
-    Ivf8SearchImpl search_impl = ivf8_search_impl_from_string(search_impl_text, &search_impl_ok);
-    if (!search_impl_ok) {
+    raw_http_search_mode search_mode;
+    Ivf8SearchImpl search_impl;
+    if (!raw_http_search_mode_from_string(search_impl_text, &search_mode, &search_impl)) {
         fprintf(stderr, "invalid RINHA_SEARCH_IMPL=%s\n", search_impl_text);
         return 1;
     }
-    if (search_impl == IVF8_SEARCH_IMPL_AVX2 && !ivf8_cpu_supports_avx2()) {
+    if (search_mode == RAW_HTTP_SEARCH_IVF8 &&
+        search_impl == IVF8_SEARCH_IMPL_AVX2 &&
+        !ivf8_cpu_supports_avx2()) {
         fprintf(stderr, "RINHA_SEARCH_IMPL=avx2 requested but AVX2 is unavailable; falling back to scalar\n");
         search_impl = IVF8_SEARCH_IMPL_SCALAR;
         search_impl_text = "scalar";
     }
 
     Ivf8Index index;
+    memset(&index, 0, sizeof(index));
+    index.fd = -1;
     char err[256];
-    if (ivf8_index_open(index_path, &index, err, sizeof(err)) != 0) {
+    KdPrimaryIndex kdprimary;
+    memset(&kdprimary, 0, sizeof(kdprimary));
+    kdprimary.fd = -1;
+
+    bool kdtree_repair_enabled = env_bool("RINHA_KDTREE_REPAIR_ENABLED", false);
+    if (search_mode == RAW_HTTP_SEARCH_KDPRIMARY && kdtree_repair_enabled) {
+        fprintf(stderr, "RINHA_KDTREE_REPAIR_ENABLED cannot be combined with RINHA_SEARCH_IMPL=kdprimary\n");
+        return 1;
+    }
+
+    if (search_mode == RAW_HTTP_SEARCH_KDPRIMARY) {
+        const char *kdprimary_path = getenv("RINHA_KDPRIMARY_PATH");
+        if (kdprimary_path == NULL || kdprimary_path[0] == '\0') {
+            kdprimary_path = RINHA_DEFAULT_KDPRIMARY_PATH;
+        }
+        if (kdprimary_open(kdprimary_path, &kdprimary, err, sizeof(err)) != 0) {
+            fprintf(stderr, "load KD-primary %s: %s\n", kdprimary_path, err);
+            return 1;
+        }
+        bool kdprimary_touch = env_bool("RINHA_KDPRIMARY_TOUCH", false);
+        uint64_t touch_sum = 0;
+        uint64_t touch_elapsed_ns = 0;
+        if (kdprimary_touch) {
+            uint64_t start = metrics_now_ns();
+            touch_sum = kdprimary_touch_pages(&kdprimary);
+            touch_elapsed_ns = metrics_now_ns() - start;
+        }
+        fprintf(stderr,
+                "kdprimary enabled=1 path=%s points=%u nodes=%u leaf_size=%u memory_mib=%.2f touch=%s touch_ms=%.3f sink=%llu\n",
+                kdprimary_path,
+                kdprimary.count,
+                kdprimary.node_count,
+                kdprimary.leaf_size,
+                (double)kdprimary_runtime_memory_bytes(&kdprimary) / 1048576.0,
+                kdprimary_touch ? "true" : "false",
+                (double)touch_elapsed_ns / 1000000.0,
+                (unsigned long long)touch_sum);
+    } else if (ivf8_index_open(index_path, &index, err, sizeof(err)) != 0) {
         fprintf(stderr, "load IVF8 index %s: %s\n", index_path, err);
         return 1;
     }
 
-    bool kdtree_repair_enabled = env_bool("RINHA_KDTREE_REPAIR_ENABLED", false);
     const char *kdtree_path = getenv("RINHA_KDTREE_PATH");
     if (kdtree_path == NULL || kdtree_path[0] == '\0') {
         kdtree_path = RINHA_DEFAULT_KDTREE_PATH;
@@ -200,6 +241,7 @@ int main(void) {
     KdTreeRepairPolicy kdtree_policy;
     if (!kdtree_repair_policy_from_string(kdtree_policy_text, &kdtree_policy)) {
         fprintf(stderr, "invalid RINHA_KDTREE_REPAIR_POLICY=%s\n", kdtree_policy_text);
+        kdprimary_close(&kdprimary);
         ivf8_index_close(&index);
         return 1;
     }
@@ -209,6 +251,7 @@ int main(void) {
     if (kdtree_repair_enabled) {
         if (kdtree_mmap_nodes_for_ivf8(&kdtree, &index, kdtree_path) != 0) {
             fprintf(stderr, "load KD-tree %s: %s\n", kdtree_path, strerror(errno));
+            kdprimary_close(&kdprimary);
             ivf8_index_close(&index);
             return 1;
         }
@@ -225,8 +268,10 @@ int main(void) {
     bool use_madvise = metrics_parse_enabled(getenv("RINHA_INDEX_MADVISE"));
 
     raw_http_app app = {
-        .index = &index,
+        .index = search_mode == RAW_HTTP_SEARCH_IVF8 ? &index : NULL,
+        .kdprimary = search_mode == RAW_HTTP_SEARCH_KDPRIMARY ? &kdprimary : NULL,
         .kdtree = kdtree_repair_enabled ? &kdtree : NULL,
+        .search_mode = search_mode,
         .search_config = {
             .max_candidates = env_u32("RINHA_IVF8_MAX_CANDIDATES", RINHA_DEFAULT_IVF8_MAX_CANDIDATES),
             .probes = env_u32("RINHA_IVF8_PROBES", RINHA_DEFAULT_IVF8_PROBES),
@@ -241,7 +286,9 @@ int main(void) {
         .queue_size = queue_size,
     };
 
-    run_index_warmup(&index, &app.search_config, warmup_mode, warmup_queries, use_madvise);
+    if (search_mode == RAW_HTTP_SEARCH_IVF8) {
+        run_index_warmup(&index, &app.search_config, warmup_mode, warmup_queries, use_madvise);
+    }
 
     fdpass_options fdpass_opts = {
         .exec_mode = exec_mode,
@@ -257,6 +304,7 @@ int main(void) {
     } else {
         fprintf(stderr, "invalid RINHA_LISTEN_MODE=%s\n", listen_mode);
         kdtree_free(&kdtree);
+        kdprimary_close(&kdprimary);
         ivf8_index_close(&index);
         return 1;
     }
@@ -264,10 +312,12 @@ int main(void) {
     if (serve_result != 0) {
         perror("serve");
         kdtree_free(&kdtree);
+        kdprimary_close(&kdprimary);
         ivf8_index_close(&index);
         return 1;
     }
     kdtree_free(&kdtree);
+    kdprimary_close(&kdprimary);
     ivf8_index_close(&index);
     return 0;
 }
