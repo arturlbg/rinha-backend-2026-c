@@ -23,7 +23,7 @@ services:
       dockerfile: Dockerfile
       args:
         MAKE_TARGET: "${RINHA_MAKE_TARGET:-all}"
-    image: rinha-c-phase8d:local
+    image: rinha-c-phase8g:local
     platform: linux/amd64
     user: "0:0"
     environment:
@@ -58,7 +58,7 @@ services:
       dockerfile: Dockerfile
       args:
         MAKE_TARGET: "${RINHA_MAKE_TARGET:-all}"
-    image: rinha-c-phase8d:local
+    image: rinha-c-phase8g:local
     platform: linux/amd64
     user: "0:0"
     environment:

@@ -27,9 +27,16 @@ static void test_policy_parse(void) {
     KdTreeRepairPolicy policy;
     CHECK(kdtree_repair_policy_from_string("boundary23_far45", &policy));
     CHECK(policy == KDTREE_REPAIR_POLICY_BOUNDARY23_FAR45);
+    CHECK(kdtree_repair_policy_from_string("minimal_v1", &policy));
+    CHECK(policy == KDTREE_REPAIR_POLICY_MINIMAL_V1);
+    CHECK(kdtree_repair_policy_from_string("perfect_v1", &policy));
+    CHECK(policy == KDTREE_REPAIR_POLICY_PERFECT_V1);
     CHECK(kdtree_repair_policy_from_string("", &policy));
+    CHECK(policy == KDTREE_REPAIR_POLICY_BOUNDARY23_FAR45);
     CHECK(!kdtree_repair_policy_from_string("other", &policy));
     CHECK(strcmp(kdtree_repair_policy_name(policy), "boundary23_far45") == 0);
+    CHECK(strcmp(kdtree_repair_policy_name(KDTREE_REPAIR_POLICY_MINIMAL_V1), "minimal_v1") == 0);
+    CHECK(strcmp(kdtree_repair_policy_name(KDTREE_REPAIR_POLICY_PERFECT_V1), "perfect_v1") == 0);
 }
 
 static void test_boundary23_far45(void) {
@@ -54,9 +61,45 @@ static void test_boundary23_far45(void) {
     CHECK(!kdtree_repair_should_run(policy, &trace));
 }
 
+static void test_minimal_v1(void) {
+    KdTreeRepairPolicy policy = KDTREE_REPAIR_POLICY_MINIMAL_V1;
+    Ivf8SearchTraceResult trace = make_trace(2, KDTREE_REPAIR_MINIMAL_V1_WORST_THRESHOLD - 1u);
+    CHECK(!kdtree_repair_should_run(policy, &trace));
+    trace = make_trace(2, KDTREE_REPAIR_MINIMAL_V1_WORST_THRESHOLD);
+    CHECK(kdtree_repair_should_run(policy, &trace));
+    trace = make_trace(3, KDTREE_REPAIR_MINIMAL_V1_WORST_THRESHOLD + 1u);
+    CHECK(kdtree_repair_should_run(policy, &trace));
+    trace = make_trace(4, UINT64_MAX);
+    CHECK(!kdtree_repair_should_run(policy, &trace));
+    trace = make_trace(5, UINT64_MAX);
+    CHECK(!kdtree_repair_should_run(policy, &trace));
+    trace = make_trace(1, UINT64_MAX);
+    CHECK(!kdtree_repair_should_run(policy, &trace));
+}
+
+static void test_perfect_v1(void) {
+    KdTreeRepairPolicy policy = KDTREE_REPAIR_POLICY_PERFECT_V1;
+    Ivf8SearchTraceResult trace = make_trace(2, KDTREE_REPAIR_PERFECT_V1_BOUNDARY_WORST_THRESHOLD - 1u);
+    CHECK(!kdtree_repair_should_run(policy, &trace));
+    trace = make_trace(2, KDTREE_REPAIR_PERFECT_V1_BOUNDARY_WORST_THRESHOLD);
+    CHECK(kdtree_repair_should_run(policy, &trace));
+    trace = make_trace(3, KDTREE_REPAIR_PERFECT_V1_BOUNDARY_WORST_THRESHOLD + 1u);
+    CHECK(kdtree_repair_should_run(policy, &trace));
+    trace = make_trace(4, KDTREE_REPAIR_PERFECT_V1_FAR_WORST_THRESHOLD - 1u);
+    CHECK(!kdtree_repair_should_run(policy, &trace));
+    trace = make_trace(4, KDTREE_REPAIR_PERFECT_V1_FAR_WORST_THRESHOLD);
+    CHECK(kdtree_repair_should_run(policy, &trace));
+    trace = make_trace(5, KDTREE_REPAIR_PERFECT_V1_FAR_WORST_THRESHOLD);
+    CHECK(kdtree_repair_should_run(policy, &trace));
+    trace = make_trace(1, UINT64_MAX);
+    CHECK(!kdtree_repair_should_run(policy, &trace));
+}
+
 int main(void) {
     test_policy_parse();
     test_boundary23_far45();
+    test_minimal_v1();
+    test_perfect_v1();
 
     if (failures != 0) {
         fprintf(stderr, "%d kdtree repair test failure(s)\n", failures);

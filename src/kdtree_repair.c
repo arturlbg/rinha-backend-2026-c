@@ -9,6 +9,18 @@ bool kdtree_repair_policy_from_string(const char *value, KdTreeRepairPolicy *out
         }
         return true;
     }
+    if (strcmp(value, "minimal_v1") == 0) {
+        if (out != NULL) {
+            *out = KDTREE_REPAIR_POLICY_MINIMAL_V1;
+        }
+        return true;
+    }
+    if (strcmp(value, "perfect_v1") == 0) {
+        if (out != NULL) {
+            *out = KDTREE_REPAIR_POLICY_PERFECT_V1;
+        }
+        return true;
+    }
     return false;
 }
 
@@ -16,6 +28,10 @@ const char *kdtree_repair_policy_name(KdTreeRepairPolicy policy) {
     switch (policy) {
         case KDTREE_REPAIR_POLICY_BOUNDARY23_FAR45:
             return "boundary23_far45";
+        case KDTREE_REPAIR_POLICY_PERFECT_V1:
+            return "perfect_v1";
+        case KDTREE_REPAIR_POLICY_MINIMAL_V1:
+            return "minimal_v1";
     }
     return "unknown";
 }
@@ -32,6 +48,22 @@ bool kdtree_repair_should_run(KdTreeRepairPolicy policy, const Ivf8SearchTraceRe
                    fraud_count == 3u ||
                    ((fraud_count == 4u || fraud_count == 5u) &&
                     worst >= KDTREE_REPAIR_BOUNDARY23_FAR45_THRESHOLD);
+        }
+        case KDTREE_REPAIR_POLICY_MINIMAL_V1: {
+            uint8_t fraud_count = trace->result.fraud_count;
+            uint64_t worst = trace->top[IVF8_SEARCH_TOP_K - 1u].distance;
+            return (fraud_count == 2u || fraud_count == 3u) &&
+                   worst >= KDTREE_REPAIR_MINIMAL_V1_WORST_THRESHOLD;
+        }
+        case KDTREE_REPAIR_POLICY_PERFECT_V1: {
+            uint8_t fraud_count = trace->result.fraud_count;
+            uint64_t worst = trace->top[IVF8_SEARCH_TOP_K - 1u].distance;
+            if ((fraud_count == 2u || fraud_count == 3u) &&
+                worst >= KDTREE_REPAIR_PERFECT_V1_BOUNDARY_WORST_THRESHOLD) {
+                return true;
+            }
+            return (fraud_count == 4u || fraud_count == 5u) &&
+                   worst >= KDTREE_REPAIR_PERFECT_V1_FAR_WORST_THRESHOLD;
         }
     }
     return false;

@@ -28,6 +28,8 @@ typedef enum {
     POLICY_BOUNDARY23 = 0,
     POLICY_BOUNDARY234,
     POLICY_BOUNDARY23_FAR45,
+    POLICY_PERFECT_V1,
+    POLICY_MINIMAL_V1,
     POLICY_BOUNDARY23_FAR,
     POLICY_UNCERTAIN,
     POLICY_NON_EXTREME,
@@ -66,7 +68,7 @@ typedef struct {
 static void usage(void) {
     fprintf(stderr,
             "usage: evaluate_hybrid --index <index.bin> --tree <tree.bin> --test-data <test-data.json> "
-            "[--limit N] [--policy boundary23|boundary234|boundary23_far45|boundary23_far|uncertain|non_extreme|all] "
+            "[--limit N] [--policy boundary23|boundary234|boundary23_far45|perfect_v1|minimal_v1|boundary23_far|uncertain|non_extreme|all] "
             "[--worst-threshold N] [--margin-threshold N] [--assume-p99-ms N] "
             "[--output-errors path]\n");
 }
@@ -85,6 +87,10 @@ static const char *policy_name(HybridPolicy policy) {
             return "boundary234";
         case POLICY_BOUNDARY23_FAR45:
             return "boundary23_far45";
+        case POLICY_PERFECT_V1:
+            return "perfect_v1";
+        case POLICY_MINIMAL_V1:
+            return "minimal_v1";
         case POLICY_BOUNDARY23_FAR:
             return "boundary23_far";
         case POLICY_UNCERTAIN:
@@ -104,6 +110,10 @@ static bool parse_policy(const char *value, HybridPolicy *out) {
         *out = POLICY_BOUNDARY234;
     } else if (strcmp(value, "boundary23_far45") == 0) {
         *out = POLICY_BOUNDARY23_FAR45;
+    } else if (strcmp(value, "perfect_v1") == 0) {
+        *out = POLICY_PERFECT_V1;
+    } else if (strcmp(value, "minimal_v1") == 0) {
+        *out = POLICY_MINIMAL_V1;
     } else if (strcmp(value, "boundary23_far") == 0 || strcmp(value, "distance_gate") == 0) {
         *out = POLICY_BOUNDARY23_FAR;
     } else if (strcmp(value, "uncertain") == 0) {
@@ -388,7 +398,14 @@ static bool should_repair(HybridPolicy policy,
         case POLICY_BOUNDARY234:
             return fc == 2u || fc == 3u || fc == 4u;
         case POLICY_BOUNDARY23_FAR45:
+            if (worst_threshold == KDTREE_REPAIR_BOUNDARY23_FAR45_THRESHOLD) {
+                return kdtree_repair_should_run(KDTREE_REPAIR_POLICY_BOUNDARY23_FAR45, trace);
+            }
             return fc == 2u || fc == 3u || ((fc == 4u || fc == 5u) && worst >= worst_threshold);
+        case POLICY_PERFECT_V1:
+            return kdtree_repair_should_run(KDTREE_REPAIR_POLICY_PERFECT_V1, trace);
+        case POLICY_MINIMAL_V1:
+            return kdtree_repair_should_run(KDTREE_REPAIR_POLICY_MINIMAL_V1, trace);
         case POLICY_BOUNDARY23_FAR:
             return fc == 2u || fc == 3u || worst >= worst_threshold;
         case POLICY_UNCERTAIN:
