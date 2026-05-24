@@ -1,0 +1,6 @@
+.git
+build
+tmp
+release/*.tmp
+release/*.log
+*.md

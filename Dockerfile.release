@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1
+
+FROM --platform=$BUILDPLATFORM gcc:13-bookworm AS build
+WORKDIR /src
+
+COPY Makefile ./
+COPY include ./include
+COPY src ./src
+
+RUN make release
+
+FROM debian:bookworm-slim AS runtime
+WORKDIR /app
+
+COPY --from=build /src/build/rinha-api /app/rinha-api
+COPY release/kdprimary2.bin /app/resources/kdprimary2.bin
+
+ENV RINHA_ADDR=:8080
+ENV RINHA_LISTEN_MODE=fdpass
+ENV RINHA_SEARCH_IMPL=kdprimary2
+ENV RINHA_KDPRIMARY2_PATH=/app/resources/kdprimary2.bin
+ENV RINHA_KDPRIMARY2_TOUCH=true
+ENV RINHA_EXEC_MODE=epoll
+ENV RINHA_METRICS_ENABLED=false
+
+EXPOSE 8080
+ENTRYPOINT ["/app/rinha-api"]
