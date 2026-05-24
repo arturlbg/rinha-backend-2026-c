@@ -10,6 +10,7 @@
 #include "ivf8_index.h"
 #include "ivf8_search.h"
 #include "kdprimary.h"
+#include "kdprimary2.h"
 #include "kdtree.h"
 #include "kdtree_repair.h"
 #include "metrics.h"
@@ -17,7 +18,7 @@
 #define RAW_HTTP_CONN_WANT_READ 1u
 #define RAW_HTTP_CONN_WANT_WRITE 2u
 #define RAW_HTTP_CONN_CLOSED 4u
-#define RAW_HTTP_DEBUG_RESPONSE_BYTES 12288u
+#define RAW_HTTP_DEBUG_RESPONSE_BYTES 24576u
 
 typedef enum {
     RAW_HTTP_METHOD_OTHER = 0,
@@ -34,7 +35,8 @@ typedef enum {
 
 typedef enum {
     RAW_HTTP_SEARCH_IVF8 = 0,
-    RAW_HTTP_SEARCH_KDPRIMARY = 1
+    RAW_HTTP_SEARCH_KDPRIMARY = 1,
+    RAW_HTTP_SEARCH_KDPRIMARY2 = 2
 } raw_http_search_mode;
 
 typedef struct {
@@ -45,6 +47,7 @@ typedef struct {
 typedef struct {
     const Ivf8Index *index;
     const KdPrimaryIndex *kdprimary;
+    const KdPrimary2Index *kdprimary2;
     const KdTree *kdtree;
     raw_http_search_mode search_mode;
     Ivf8SearchConfig search_config;

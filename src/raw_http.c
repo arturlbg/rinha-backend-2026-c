@@ -39,6 +39,45 @@ static RinhaMetrics *app_metrics(const raw_http_app *app) {
     return app->metrics;
 }
 
+static void metrics_note_open_connection(RinhaMetrics *metrics) {
+    if (metrics == NULL) {
+        return;
+    }
+    metrics_inc(&metrics->open_connections);
+    uint64_t open = atomic_load_explicit(&metrics->open_connections, memory_order_relaxed);
+    metrics_update_max(&metrics->max_open_connections, open);
+}
+
+static void metrics_note_closed_connection(RinhaMetrics *metrics) {
+    if (metrics == NULL) {
+        return;
+    }
+    metrics_inc(&metrics->closed_connections);
+    metrics_dec(&metrics->open_connections);
+}
+
+static void metrics_note_kdprimary2_search(RinhaMetrics *metrics,
+                                           const KdPrimary2SearchResult *result,
+                                           uint64_t elapsed_ns) {
+    if (metrics == NULL || result == NULL) {
+        return;
+    }
+    metrics_inc(&metrics->kdprimary2_search_count);
+    metrics_observe(&metrics->kdprimary2_search, elapsed_ns);
+    metrics_add(&metrics->kdprimary2_nodes_visited_total, result->stats.nodes_visited);
+    metrics_add(&metrics->kdprimary2_leaves_visited_total, result->stats.leaves_visited);
+    metrics_add(&metrics->kdprimary2_points_evaluated_total, result->stats.points_evaluated);
+    metrics_add(&metrics->kdprimary2_pruned_branches_total, result->stats.pruned_branches);
+    metrics_update_max(&metrics->kdprimary2_nodes_visited_max, result->stats.nodes_visited);
+    metrics_update_max(&metrics->kdprimary2_leaves_visited_max, result->stats.leaves_visited);
+    metrics_update_max(&metrics->kdprimary2_points_evaluated_max, result->stats.points_evaluated);
+    metrics_update_max(&metrics->kdprimary2_pruned_branches_max, result->stats.pruned_branches);
+    metrics_observe_value(&metrics->kdprimary2_nodes_visited, result->stats.nodes_visited);
+    metrics_observe_value(&metrics->kdprimary2_leaves_visited, result->stats.leaves_visited);
+    metrics_observe_value(&metrics->kdprimary2_points_evaluated, result->stats.points_evaluated);
+    metrics_observe_value(&metrics->kdprimary2_pruned_branches, result->stats.pruned_branches);
+}
+
 static int parse_port(const char *addr) {
     const char *port_text = addr;
     const char *colon = strrchr(addr, ':');
@@ -91,6 +130,11 @@ bool raw_http_search_mode_from_string(const char *value,
     }
     if (value != NULL && strcmp(value, "kdprimary") == 0) {
         *mode = RAW_HTTP_SEARCH_KDPRIMARY;
+        *ivf8_impl = IVF8_SEARCH_IMPL_SCALAR;
+        return true;
+    }
+    if (value != NULL && strcmp(value, "kdprimary2") == 0) {
+        *mode = RAW_HTTP_SEARCH_KDPRIMARY2;
         *ivf8_impl = IVF8_SEARCH_IMPL_SCALAR;
         return true;
     }
@@ -257,6 +301,7 @@ static const http_response *route_request(const parsed_request *request, const c
         }
         if (app == NULL || body == NULL ||
             (app->search_mode == RAW_HTTP_SEARCH_KDPRIMARY && app->kdprimary == NULL) ||
+            (app->search_mode == RAW_HTTP_SEARCH_KDPRIMARY2 && app->kdprimary2 == NULL) ||
             (app->search_mode == RAW_HTTP_SEARCH_IVF8 && app->index == NULL)) {
             return &RESPONSE_FRAUD_APPROVED;
         }
@@ -276,6 +321,12 @@ static const http_response *route_request(const parsed_request *request, const c
         uint8_t fraud_count;
         if (app->search_mode == RAW_HTTP_SEARCH_KDPRIMARY) {
             fraud_count = kdprimary_search_fraud_count(app->kdprimary, query);
+        } else if (app->search_mode == RAW_HTTP_SEARCH_KDPRIMARY2) {
+            KdPrimary2SearchResult result = kdprimary2_search_top5(app->kdprimary2, query);
+            fraud_count = result.fraud_count;
+            if (metrics != NULL) {
+                metrics_note_kdprimary2_search(metrics, &result, metrics_now_ns() - start);
+            }
         } else if (app->kdtree_repair_enabled && app->kdtree != NULL) {
             Ivf8SearchTraceResult trace = ivf8_search_trace(app->index, query, &app->search_config);
             fraud_count = trace.result.fraud_count;
@@ -577,9 +628,10 @@ static int raw_http_handle_connection_loop(int client_fd, const raw_http_app *ap
 int raw_http_handle_connection(int client_fd, const raw_http_app *app) {
     RinhaMetrics *metrics = app_metrics(app);
     uint64_t start = metrics != NULL ? metrics_now_ns() : 0u;
+    metrics_note_open_connection(metrics);
     int result = raw_http_handle_connection_loop(client_fd, app);
     if (metrics != NULL) {
-        metrics_inc(&metrics->closed_connections);
+        metrics_note_closed_connection(metrics);
         metrics_observe(&metrics->connection_lifetime, metrics_now_ns() - start);
     }
     return result;
@@ -605,6 +657,7 @@ void raw_http_conn_init(raw_http_conn *conn, int client_fd, const raw_http_app *
     conn->app = app;
     RinhaMetrics *metrics = app_metrics(app);
     conn->connection_start_ns = metrics != NULL ? metrics_now_ns() : 0u;
+    metrics_note_open_connection(metrics);
 }
 
 bool raw_http_conn_wants_write(const raw_http_conn *conn) {
@@ -622,7 +675,7 @@ void raw_http_conn_close(raw_http_conn *conn) {
     }
     conn->closed = true;
     if (metrics != NULL) {
-        metrics_inc(&metrics->closed_connections);
+        metrics_note_closed_connection(metrics);
         metrics_observe(&metrics->connection_lifetime, metrics_now_ns() - conn->connection_start_ns);
     }
 }

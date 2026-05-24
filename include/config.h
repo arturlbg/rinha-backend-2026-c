@@ -14,6 +14,8 @@
 #define RINHA_DEFAULT_SEARCH_IMPL "scalar"
 #define RINHA_DEFAULT_KDPRIMARY_PATH "/app/resources/kdprimary.bin"
 #define RINHA_DEFAULT_KDPRIMARY_TOUCH "false"
+#define RINHA_DEFAULT_KDPRIMARY2_PATH "/app/resources/kdprimary2.bin"
+#define RINHA_DEFAULT_KDPRIMARY2_TOUCH "false"
 #define RINHA_DEFAULT_KDTREE_PATH "/app/resources/kdtree.bin"
 #define RINHA_DEFAULT_KDTREE_REPAIR_POLICY "boundary23_far45"
 #define RINHA_DEFAULT_IVF8_MAX_CANDIDATES 4096u

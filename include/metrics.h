@@ -7,14 +7,21 @@
 #include <stdint.h>
 
 #define RINHA_METRIC_BUCKETS 15u
+#define RINHA_VALUE_BUCKETS 15u
 
 typedef struct {
     atomic_uint_fast64_t buckets[RINHA_METRIC_BUCKETS];
 } RinhaMetricHistogram;
 
 typedef struct {
+    atomic_uint_fast64_t buckets[RINHA_VALUE_BUCKETS];
+} RinhaValueHistogram;
+
+typedef struct {
     bool enabled;
 
+    atomic_uint_fast64_t open_connections;
+    atomic_uint_fast64_t max_open_connections;
     atomic_uint_fast64_t accepted_connections;
     atomic_uint_fast64_t adopted_fds;
     atomic_uint_fast64_t closed_connections;
@@ -40,14 +47,28 @@ typedef struct {
     atomic_uint_fast64_t epoll_parser_errors;
     atomic_uint_fast64_t epoll_open_connections;
     atomic_uint_fast64_t epoll_max_open_connections;
+    atomic_uint_fast64_t kdprimary2_search_count;
+    atomic_uint_fast64_t kdprimary2_nodes_visited_total;
+    atomic_uint_fast64_t kdprimary2_leaves_visited_total;
+    atomic_uint_fast64_t kdprimary2_points_evaluated_total;
+    atomic_uint_fast64_t kdprimary2_pruned_branches_total;
+    atomic_uint_fast64_t kdprimary2_nodes_visited_max;
+    atomic_uint_fast64_t kdprimary2_leaves_visited_max;
+    atomic_uint_fast64_t kdprimary2_points_evaluated_max;
+    atomic_uint_fast64_t kdprimary2_pruned_branches_max;
 
     RinhaMetricHistogram request_total;
     RinhaMetricHistogram vectorize;
     RinhaMetricHistogram search;
+    RinhaMetricHistogram kdprimary2_search;
     RinhaMetricHistogram write_response;
     RinhaMetricHistogram connection_lifetime;
     RinhaMetricHistogram fdpass_receive;
     RinhaMetricHistogram queue_wait;
+    RinhaValueHistogram kdprimary2_nodes_visited;
+    RinhaValueHistogram kdprimary2_leaves_visited;
+    RinhaValueHistogram kdprimary2_points_evaluated;
+    RinhaValueHistogram kdprimary2_pruned_branches;
 } RinhaMetrics;
 
 void metrics_init(RinhaMetrics *metrics, bool enabled);
@@ -55,8 +76,10 @@ bool metrics_parse_enabled(const char *value);
 uint64_t metrics_now_ns(void);
 void metrics_inc(atomic_uint_fast64_t *counter);
 void metrics_dec(atomic_uint_fast64_t *counter);
+void metrics_add(atomic_uint_fast64_t *counter, uint64_t value);
 void metrics_update_max(atomic_uint_fast64_t *counter, uint64_t value);
 void metrics_observe(RinhaMetricHistogram *histogram, uint64_t ns);
+void metrics_observe_value(RinhaValueHistogram *histogram, uint64_t value);
 size_t metrics_write_text(const RinhaMetrics *metrics,
                           char *out,
                           size_t cap,

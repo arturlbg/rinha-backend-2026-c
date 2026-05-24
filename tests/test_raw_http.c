@@ -278,6 +278,9 @@ static void test_search_mode_parse(void) {
     CHECK(raw_http_search_mode_from_string("kdprimary", &mode, &impl));
     CHECK(mode == RAW_HTTP_SEARCH_KDPRIMARY);
 
+    CHECK(raw_http_search_mode_from_string("kdprimary2", &mode, &impl));
+    CHECK(mode == RAW_HTTP_SEARCH_KDPRIMARY2);
+
     CHECK(!raw_http_search_mode_from_string("bogus", &mode, &impl));
 }
 
@@ -540,6 +543,50 @@ static void test_valid_body_uses_kdprimary_response(void) {
     kdprimary_build_free(&build);
 }
 
+static void test_valid_body_uses_kdprimary2_response(void) {
+    int16_t query[FASTVECTOR_DIMENSIONS];
+    CHECK(fastvector_vectorize(valid_payload(), strlen(valid_payload()), query));
+
+    int16_t vectors[5 * IVF8_INDEX_DIMS];
+    uint8_t labels[5] = {1, 1, 1, 0, 0};
+    for (uint32_t point = 0; point < 5; point++) {
+        memcpy(vectors + (size_t)point * IVF8_INDEX_DIMS, query, IVF8_INDEX_DIMS * sizeof(int16_t));
+        vectors[(size_t)point * IVF8_INDEX_DIMS] += (int16_t)point;
+    }
+
+    char err[256];
+    KdPrimary2Build build;
+    CHECK(kdprimary2_build_from_points(&build, vectors, labels, 5, 4, err, sizeof(err)) == 0);
+    KdPrimary2Index kdprimary2 = {
+        .count = build.count,
+        .node_count = build.node_count,
+        .block_count = build.block_count,
+        .root = build.root,
+        .leaf_size = build.leaf_size,
+        .nodes = build.nodes,
+        .block_data = build.block_data,
+        .labels = build.labels,
+    };
+    RinhaMetrics metrics;
+    metrics_init(&metrics, true);
+    raw_http_app app = {
+        .kdprimary2 = &kdprimary2,
+        .search_mode = RAW_HTTP_SEARCH_KDPRIMARY2,
+        .metrics = &metrics,
+    };
+
+    char req[1024];
+    size_t req_len = make_request(req, sizeof(req), "POST", "/fraud-score", valid_payload());
+    test_chunk chunks[] = {{req, req_len}};
+    char out[2048];
+    size_t out_len = run_connection_with_app(chunks, 1, out, sizeof(out), &app);
+    CHECK(contains_text(out, out_len, "{\"approved\":false,\"fraud_score\":0.6}"));
+    CHECK(atomic_load_explicit(&metrics.kdprimary2_search_count, memory_order_relaxed) == 1);
+    CHECK(atomic_load_explicit(&metrics.kdprimary2_points_evaluated_total, memory_order_relaxed) == 5);
+    CHECK(atomic_load_explicit(&metrics.kdprimary2_nodes_visited_total, memory_order_relaxed) > 0);
+    kdprimary2_build_free(&build);
+}
+
 static void test_metrics_counts_and_debug(void) {
     RinhaMetrics metrics;
     metrics_init(&metrics, true);
@@ -580,6 +627,8 @@ static void test_metrics_counts_and_debug(void) {
     CHECK(atomic_load_explicit(&metrics.debug_count, memory_order_relaxed) == 1);
     CHECK(atomic_load_explicit(&metrics.vectorize_failures, memory_order_relaxed) == 1);
     CHECK(atomic_load_explicit(&metrics.closed_connections, memory_order_relaxed) == 1);
+    CHECK(atomic_load_explicit(&metrics.open_connections, memory_order_relaxed) == 0);
+    CHECK(atomic_load_explicit(&metrics.max_open_connections, memory_order_relaxed) == 1);
 }
 
 int main(void) {
@@ -600,6 +649,7 @@ int main(void) {
     test_invalid_body_returns_safe_approved();
     test_valid_body_uses_search_response();
     test_valid_body_uses_kdprimary_response();
+    test_valid_body_uses_kdprimary2_response();
     test_metrics_counts_and_debug();
 
     if (failures != 0) {

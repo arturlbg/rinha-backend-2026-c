@@ -42,6 +42,41 @@ static const char *metric_bucket_labels[RINHA_METRIC_BUCKETS] = {
     "gte_250ms",
 };
 
+static const uint64_t value_thresholds[RINHA_VALUE_BUCKETS - 1u] = {
+    16ull,
+    32ull,
+    64ull,
+    128ull,
+    256ull,
+    512ull,
+    1024ull,
+    2048ull,
+    4096ull,
+    8192ull,
+    16384ull,
+    32768ull,
+    65536ull,
+    131072ull,
+};
+
+static const char *value_bucket_labels[RINHA_VALUE_BUCKETS] = {
+    "lt_16",
+    "lt_32",
+    "lt_64",
+    "lt_128",
+    "lt_256",
+    "lt_512",
+    "lt_1024",
+    "lt_2048",
+    "lt_4096",
+    "lt_8192",
+    "lt_16384",
+    "lt_32768",
+    "lt_65536",
+    "lt_131072",
+    "gte_131072",
+};
+
 void metrics_init(RinhaMetrics *metrics, bool enabled) {
     if (metrics == NULL) {
         return;
@@ -79,6 +114,10 @@ void metrics_dec(atomic_uint_fast64_t *counter) {
     atomic_fetch_sub_explicit(counter, 1u, memory_order_relaxed);
 }
 
+void metrics_add(atomic_uint_fast64_t *counter, uint64_t value) {
+    atomic_fetch_add_explicit(counter, value, memory_order_relaxed);
+}
+
 void metrics_update_max(atomic_uint_fast64_t *counter, uint64_t value) {
     uint_fast64_t current = atomic_load_explicit(counter, memory_order_relaxed);
     while (current < value &&
@@ -94,6 +133,17 @@ void metrics_observe(RinhaMetricHistogram *histogram, uint64_t ns) {
     uint32_t bucket = RINHA_METRIC_BUCKETS - 1u;
     for (uint32_t i = 0; i < RINHA_METRIC_BUCKETS - 1u; i++) {
         if (ns < metric_thresholds[i]) {
+            bucket = i;
+            break;
+        }
+    }
+    atomic_fetch_add_explicit(&histogram->buckets[bucket], 1u, memory_order_relaxed);
+}
+
+void metrics_observe_value(RinhaValueHistogram *histogram, uint64_t value) {
+    uint32_t bucket = RINHA_VALUE_BUCKETS - 1u;
+    for (uint32_t i = 0; i < RINHA_VALUE_BUCKETS - 1u; i++) {
+        if (value < value_thresholds[i]) {
             bucket = i;
             break;
         }
@@ -137,6 +187,20 @@ static size_t append_histogram(char *out,
     return used;
 }
 
+static size_t append_value_histogram(char *out,
+                                     size_t cap,
+                                     size_t used,
+                                     const char *name,
+                                     const RinhaValueHistogram *histogram) {
+    for (uint32_t i = 0; i < RINHA_VALUE_BUCKETS; i++) {
+        used = appendf(out, cap, used, "%s.%s=%llu\n",
+                       name,
+                       value_bucket_labels[i],
+                       (unsigned long long)load_counter(&histogram->buckets[i]));
+    }
+    return used;
+}
+
 size_t metrics_write_text(const RinhaMetrics *metrics,
                           char *out,
                           size_t cap,
@@ -164,6 +228,8 @@ size_t metrics_write_text(const RinhaMetrics *metrics,
     used = appendf(out, cap, used, "workers=%u\n", workers);
     used = appendf(out, cap, used, "queue_size=%u\n", queue_size);
 
+    used = appendf(out, cap, used, "open_connections=%llu\n", (unsigned long long)load_counter(&metrics->open_connections));
+    used = appendf(out, cap, used, "max_open_connections=%llu\n", (unsigned long long)load_counter(&metrics->max_open_connections));
     used = appendf(out, cap, used, "accepted_connections=%llu\n", (unsigned long long)load_counter(&metrics->accepted_connections));
     used = appendf(out, cap, used, "adopted_fds=%llu\n", (unsigned long long)load_counter(&metrics->adopted_fds));
     used = appendf(out, cap, used, "closed_connections=%llu\n", (unsigned long long)load_counter(&metrics->closed_connections));
@@ -189,14 +255,28 @@ size_t metrics_write_text(const RinhaMetrics *metrics,
     used = appendf(out, cap, used, "epoll_parser_errors=%llu\n", (unsigned long long)load_counter(&metrics->epoll_parser_errors));
     used = appendf(out, cap, used, "epoll_open_connections=%llu\n", (unsigned long long)load_counter(&metrics->epoll_open_connections));
     used = appendf(out, cap, used, "epoll_max_open_connections=%llu\n", (unsigned long long)load_counter(&metrics->epoll_max_open_connections));
+    used = appendf(out, cap, used, "kdprimary2_search_count=%llu\n", (unsigned long long)load_counter(&metrics->kdprimary2_search_count));
+    used = appendf(out, cap, used, "kdprimary2_nodes_visited_total=%llu\n", (unsigned long long)load_counter(&metrics->kdprimary2_nodes_visited_total));
+    used = appendf(out, cap, used, "kdprimary2_leaves_visited_total=%llu\n", (unsigned long long)load_counter(&metrics->kdprimary2_leaves_visited_total));
+    used = appendf(out, cap, used, "kdprimary2_points_evaluated_total=%llu\n", (unsigned long long)load_counter(&metrics->kdprimary2_points_evaluated_total));
+    used = appendf(out, cap, used, "kdprimary2_pruned_branches_total=%llu\n", (unsigned long long)load_counter(&metrics->kdprimary2_pruned_branches_total));
+    used = appendf(out, cap, used, "kdprimary2_nodes_visited_max=%llu\n", (unsigned long long)load_counter(&metrics->kdprimary2_nodes_visited_max));
+    used = appendf(out, cap, used, "kdprimary2_leaves_visited_max=%llu\n", (unsigned long long)load_counter(&metrics->kdprimary2_leaves_visited_max));
+    used = appendf(out, cap, used, "kdprimary2_points_evaluated_max=%llu\n", (unsigned long long)load_counter(&metrics->kdprimary2_points_evaluated_max));
+    used = appendf(out, cap, used, "kdprimary2_pruned_branches_max=%llu\n", (unsigned long long)load_counter(&metrics->kdprimary2_pruned_branches_max));
 
     used = append_histogram(out, cap, used, "request_total", &metrics->request_total);
     used = append_histogram(out, cap, used, "vectorize", &metrics->vectorize);
     used = append_histogram(out, cap, used, "search", &metrics->search);
+    used = append_histogram(out, cap, used, "kdprimary2_search", &metrics->kdprimary2_search);
     used = append_histogram(out, cap, used, "write_response", &metrics->write_response);
     used = append_histogram(out, cap, used, "connection_lifetime", &metrics->connection_lifetime);
     used = append_histogram(out, cap, used, "fdpass_receive", &metrics->fdpass_receive);
     used = append_histogram(out, cap, used, "queue_wait", &metrics->queue_wait);
+    used = append_value_histogram(out, cap, used, "kdprimary2_nodes_visited", &metrics->kdprimary2_nodes_visited);
+    used = append_value_histogram(out, cap, used, "kdprimary2_leaves_visited", &metrics->kdprimary2_leaves_visited);
+    used = append_value_histogram(out, cap, used, "kdprimary2_points_evaluated", &metrics->kdprimary2_points_evaluated);
+    used = append_value_histogram(out, cap, used, "kdprimary2_pruned_branches", &metrics->kdprimary2_pruned_branches);
 
     if (used > cap) {
         used = cap;

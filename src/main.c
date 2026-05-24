@@ -2,6 +2,7 @@
 #include "fdpass.h"
 #include "ivf8_index.h"
 #include "kdprimary.h"
+#include "kdprimary2.h"
 #include "kdtree.h"
 #include "kdtree_repair.h"
 #include "metrics.h"
@@ -191,10 +192,14 @@ int main(void) {
     KdPrimaryIndex kdprimary;
     memset(&kdprimary, 0, sizeof(kdprimary));
     kdprimary.fd = -1;
+    KdPrimary2Index kdprimary2;
+    memset(&kdprimary2, 0, sizeof(kdprimary2));
+    kdprimary2.fd = -1;
 
     bool kdtree_repair_enabled = env_bool("RINHA_KDTREE_REPAIR_ENABLED", false);
-    if (search_mode == RAW_HTTP_SEARCH_KDPRIMARY && kdtree_repair_enabled) {
-        fprintf(stderr, "RINHA_KDTREE_REPAIR_ENABLED cannot be combined with RINHA_SEARCH_IMPL=kdprimary\n");
+    if ((search_mode == RAW_HTTP_SEARCH_KDPRIMARY || search_mode == RAW_HTTP_SEARCH_KDPRIMARY2) &&
+        kdtree_repair_enabled) {
+        fprintf(stderr, "RINHA_KDTREE_REPAIR_ENABLED cannot be combined with KD-primary search modes\n");
         return 1;
     }
 
@@ -225,6 +230,34 @@ int main(void) {
                 kdprimary_touch ? "true" : "false",
                 (double)touch_elapsed_ns / 1000000.0,
                 (unsigned long long)touch_sum);
+    } else if (search_mode == RAW_HTTP_SEARCH_KDPRIMARY2) {
+        const char *kdprimary2_path = getenv("RINHA_KDPRIMARY2_PATH");
+        if (kdprimary2_path == NULL || kdprimary2_path[0] == '\0') {
+            kdprimary2_path = RINHA_DEFAULT_KDPRIMARY2_PATH;
+        }
+        if (kdprimary2_open(kdprimary2_path, &kdprimary2, err, sizeof(err)) != 0) {
+            fprintf(stderr, "load KD-primary2 %s: %s\n", kdprimary2_path, err);
+            return 1;
+        }
+        bool kdprimary2_touch = env_bool("RINHA_KDPRIMARY2_TOUCH", false);
+        uint64_t touch_sum = 0;
+        uint64_t touch_elapsed_ns = 0;
+        if (kdprimary2_touch) {
+            uint64_t start = metrics_now_ns();
+            touch_sum = kdprimary2_touch_pages(&kdprimary2);
+            touch_elapsed_ns = metrics_now_ns() - start;
+        }
+        fprintf(stderr,
+                "kdprimary2 enabled=1 path=%s points=%u nodes=%u blocks=%u leaf_size=%u memory_mib=%.2f touch=%s touch_ms=%.3f sink=%llu\n",
+                kdprimary2_path,
+                kdprimary2.count,
+                kdprimary2.node_count,
+                kdprimary2.block_count,
+                kdprimary2.leaf_size,
+                (double)kdprimary2_runtime_memory_bytes(&kdprimary2) / 1048576.0,
+                kdprimary2_touch ? "true" : "false",
+                (double)touch_elapsed_ns / 1000000.0,
+                (unsigned long long)touch_sum);
     } else if (ivf8_index_open(index_path, &index, err, sizeof(err)) != 0) {
         fprintf(stderr, "load IVF8 index %s: %s\n", index_path, err);
         return 1;
@@ -241,6 +274,7 @@ int main(void) {
     KdTreeRepairPolicy kdtree_policy;
     if (!kdtree_repair_policy_from_string(kdtree_policy_text, &kdtree_policy)) {
         fprintf(stderr, "invalid RINHA_KDTREE_REPAIR_POLICY=%s\n", kdtree_policy_text);
+        kdprimary2_close(&kdprimary2);
         kdprimary_close(&kdprimary);
         ivf8_index_close(&index);
         return 1;
@@ -251,6 +285,7 @@ int main(void) {
     if (kdtree_repair_enabled) {
         if (kdtree_mmap_nodes_for_ivf8(&kdtree, &index, kdtree_path) != 0) {
             fprintf(stderr, "load KD-tree %s: %s\n", kdtree_path, strerror(errno));
+            kdprimary2_close(&kdprimary2);
             kdprimary_close(&kdprimary);
             ivf8_index_close(&index);
             return 1;
@@ -270,6 +305,7 @@ int main(void) {
     raw_http_app app = {
         .index = search_mode == RAW_HTTP_SEARCH_IVF8 ? &index : NULL,
         .kdprimary = search_mode == RAW_HTTP_SEARCH_KDPRIMARY ? &kdprimary : NULL,
+        .kdprimary2 = search_mode == RAW_HTTP_SEARCH_KDPRIMARY2 ? &kdprimary2 : NULL,
         .kdtree = kdtree_repair_enabled ? &kdtree : NULL,
         .search_mode = search_mode,
         .search_config = {
@@ -304,6 +340,7 @@ int main(void) {
     } else {
         fprintf(stderr, "invalid RINHA_LISTEN_MODE=%s\n", listen_mode);
         kdtree_free(&kdtree);
+        kdprimary2_close(&kdprimary2);
         kdprimary_close(&kdprimary);
         ivf8_index_close(&index);
         return 1;
@@ -312,11 +349,13 @@ int main(void) {
     if (serve_result != 0) {
         perror("serve");
         kdtree_free(&kdtree);
+        kdprimary2_close(&kdprimary2);
         kdprimary_close(&kdprimary);
         ivf8_index_close(&index);
         return 1;
     }
     kdtree_free(&kdtree);
+    kdprimary2_close(&kdprimary2);
     kdprimary_close(&kdprimary);
     ivf8_index_close(&index);
     return 0;
