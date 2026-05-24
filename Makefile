@@ -6,7 +6,9 @@ AVX2_CFLAGS ?= -mavx2
 
 BUILD_DIR := build
 TARGET := $(BUILD_DIR)/rinha-api
+FDLB_TARGET := $(BUILD_DIR)/rinha-fdlb
 SOURCES := src/main.c src/raw_http.c src/responses.c src/fastvector.c src/ivf8_index.c src/ivf8_search.c src/kdprimary.c src/kdprimary2.c src/kdtree.c src/kdtree_repair.c src/fdpass.c src/fd_queue.c src/metrics.c
+FDLB_SOURCES := src/fdlb_main.c src/fdlb.c
 AVX2_OBJECT := $(BUILD_DIR)/src/ivf8_search_avx2.o
 OBJECTS := $(SOURCES:%.c=$(BUILD_DIR)/%.o) $(AVX2_OBJECT)
 RAW_HTTP_TEST_TARGET := $(BUILD_DIR)/test_raw_http
@@ -19,6 +21,8 @@ IVF8_SEARCH_TEST_TARGET := $(BUILD_DIR)/test_ivf8_search
 IVF8_SEARCH_TEST_SOURCES := tests/test_ivf8_search.c src/ivf8_search.c
 FDPASS_TEST_TARGET := $(BUILD_DIR)/test_fdpass
 FDPASS_TEST_SOURCES := tests/test_fdpass.c src/fdpass.c src/fd_queue.c src/raw_http.c src/responses.c src/fastvector.c src/ivf8_search.c src/kdprimary.c src/kdprimary2.c src/kdtree.c src/kdtree_repair.c src/metrics.c
+FDLB_TEST_TARGET := $(BUILD_DIR)/test_fdlb
+FDLB_TEST_SOURCES := tests/test_fdlb.c src/fdlb.c
 FD_QUEUE_TEST_TARGET := $(BUILD_DIR)/test_fd_queue
 FD_QUEUE_TEST_SOURCES := tests/test_fd_queue.c src/fd_queue.c
 KDTREE_TEST_TARGET := $(BUILD_DIR)/test_kdtree
@@ -54,9 +58,11 @@ BUILD_KDPRIMARY2_SOURCES := tools/build_kdprimary2.c src/kdprimary2.c src/ivf8_i
 EVALUATE_KDPRIMARY2_TARGET := $(BUILD_DIR)/evaluate_kdprimary2
 EVALUATE_KDPRIMARY2_SOURCES := tools/evaluate_kdprimary2.c src/kdprimary2.c src/fastvector.c src/ivf8_search.c
 
-.PHONY: all clean test tools release
+.PHONY: all clean fdlb test tools release
 
 all: $(TARGET)
+
+fdlb: $(FDLB_TARGET)
 
 release: CFLAGS += -O3 -DNDEBUG -flto
 release: LDFLAGS += -flto
@@ -64,6 +70,10 @@ release: clean all
 
 $(TARGET): $(OBJECTS)
 	$(CC) $(OBJECTS) -pthread $(LDFLAGS) -o $@
+
+$(FDLB_TARGET): $(FDLB_SOURCES)
+	mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(FDLB_SOURCES) -o $@
 
 $(AVX2_OBJECT): src/ivf8_search_avx2.c
 	mkdir -p $(dir $@)
@@ -92,6 +102,10 @@ $(IVF8_SEARCH_TEST_TARGET): $(IVF8_SEARCH_TEST_SOURCES) $(AVX2_OBJECT)
 $(FDPASS_TEST_TARGET): $(FDPASS_TEST_SOURCES) $(AVX2_OBJECT)
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $(FDPASS_TEST_SOURCES) $(AVX2_OBJECT) -o $@
+
+$(FDLB_TEST_TARGET): $(FDLB_TEST_SOURCES)
+	mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(FDLB_TEST_SOURCES) -o $@
 
 $(FD_QUEUE_TEST_TARGET): $(FD_QUEUE_TEST_SOURCES)
 	mkdir -p $(dir $@)
@@ -163,12 +177,13 @@ $(EVALUATE_KDPRIMARY2_TARGET): $(EVALUATE_KDPRIMARY2_SOURCES) $(AVX2_OBJECT)
 
 tools: $(VECTORIZE_C_TARGET) $(INSPECT_INDEX_TARGET) $(EVALUATE_C_TARGET) $(BENCH_SEARCH_TARGET) $(BUILD_KDTREE_TARGET) $(EVALUATE_KDTREE_TARGET) $(EVALUATE_HYBRID_TARGET) $(ANALYZE_REPAIR_POLICY_TARGET) $(BUILD_KDPRIMARY_TARGET) $(EVALUATE_KDPRIMARY_TARGET) $(BUILD_KDPRIMARY2_TARGET) $(EVALUATE_KDPRIMARY2_TARGET)
 
-test: $(RAW_HTTP_TEST_TARGET) $(FASTVECTOR_TEST_TARGET) $(IVF8_INDEX_TEST_TARGET) $(IVF8_SEARCH_TEST_TARGET) $(FDPASS_TEST_TARGET) $(FD_QUEUE_TEST_TARGET) $(KDTREE_TEST_TARGET) $(KDTREE_REPAIR_TEST_TARGET) $(KDPRIMARY_TEST_TARGET) $(KDPRIMARY2_TEST_TARGET) tools
+test: $(RAW_HTTP_TEST_TARGET) $(FASTVECTOR_TEST_TARGET) $(IVF8_INDEX_TEST_TARGET) $(IVF8_SEARCH_TEST_TARGET) $(FDPASS_TEST_TARGET) $(FDLB_TEST_TARGET) $(FD_QUEUE_TEST_TARGET) $(KDTREE_TEST_TARGET) $(KDTREE_REPAIR_TEST_TARGET) $(KDPRIMARY_TEST_TARGET) $(KDPRIMARY2_TEST_TARGET) tools
 	./$(RAW_HTTP_TEST_TARGET)
 	./$(FASTVECTOR_TEST_TARGET)
 	./$(IVF8_INDEX_TEST_TARGET)
 	./$(IVF8_SEARCH_TEST_TARGET)
 	./$(FDPASS_TEST_TARGET)
+	./$(FDLB_TEST_TARGET)
 	./$(FD_QUEUE_TEST_TARGET)
 	./$(KDTREE_TEST_TARGET)
 	./$(KDTREE_REPAIR_TEST_TARGET)

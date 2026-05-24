@@ -1,0 +1,99 @@
+#include "fdlb.h"
+
+#include <assert.h>
+#include <errno.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+static int recv_one_fd_for_test(int control_fd) {
+    char data[1];
+    char control[CMSG_SPACE(sizeof(int))];
+    struct iovec iov;
+    struct msghdr msg;
+
+    memset(control, 0, sizeof(control));
+    memset(&iov, 0, sizeof(iov));
+    memset(&msg, 0, sizeof(msg));
+
+    iov.iov_base = data;
+    iov.iov_len = sizeof(data);
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control;
+    msg.msg_controllen = sizeof(control);
+
+    ssize_t n;
+    do {
+        n = recvmsg(control_fd, &msg, 0);
+    } while (n < 0 && errno == EINTR);
+    assert(n == 1);
+
+    for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+         cmsg != NULL;
+         cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+            int fd = -1;
+            memcpy(&fd, CMSG_DATA(cmsg), sizeof(fd));
+            return fd;
+        }
+    }
+
+    return -1;
+}
+
+static void test_parse_upstreams(void) {
+    char text[] = " /sockets/a.ctrl ,/sockets/b.ctrl,/sockets/c.ctrl ";
+    char *paths[4];
+    size_t count = 0;
+
+    assert(fdlb_parse_upstreams(text, paths, 4, &count) == 0);
+    assert(count == 3);
+    assert(strcmp(paths[0], "/sockets/a.ctrl") == 0);
+    assert(strcmp(paths[1], "/sockets/b.ctrl") == 0);
+    assert(strcmp(paths[2], "/sockets/c.ctrl") == 0);
+
+    char bad[] = "/sockets/a.ctrl,,/sockets/b.ctrl";
+    count = 0;
+    assert(fdlb_parse_upstreams(bad, paths, 4, &count) != 0);
+}
+
+static void test_round_robin(void) {
+    size_t cursor = 0;
+    assert(fdlb_round_robin_next(&cursor, 2) == 0);
+    assert(fdlb_round_robin_next(&cursor, 2) == 1);
+    assert(fdlb_round_robin_next(&cursor, 2) == 0);
+    assert(cursor == 1);
+}
+
+static void test_send_fd(void) {
+    int sv[2];
+    int pipefd[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    assert(pipe(pipefd) == 0);
+
+    assert(fdlb_send_one_fd(sv[0], pipefd[1]) == 0);
+    int received = recv_one_fd_for_test(sv[1]);
+    assert(received >= 0);
+
+    close(pipefd[1]);
+    const char byte = 'x';
+    assert(write(received, &byte, 1) == 1);
+
+    char got = '\0';
+    assert(read(pipefd[0], &got, 1) == 1);
+    assert(got == 'x');
+
+    close(received);
+    close(pipefd[0]);
+    close(sv[0]);
+    close(sv[1]);
+}
+
+int main(void) {
+    test_parse_upstreams();
+    test_round_robin();
+    test_send_fd();
+    return 0;
+}

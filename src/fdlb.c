@@ -1,0 +1,400 @@
+#define _GNU_SOURCE
+
+#include "fdlb.h"
+
+#include <arpa/inet.h>
+#include <ctype.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/un.h>
+#include <time.h>
+#include <unistd.h>
+
+#define FDLB_MAX_UPSTREAMS 16
+#define FDLB_UPSTREAMS_BUFFER_SIZE 2048
+#define FDLB_LISTEN_BACKLOG 4096
+
+typedef struct {
+    const char *path;
+    int fd;
+    uint64_t sent;
+    uint64_t failures;
+    uint64_t reconnects;
+} FdlbUpstream;
+
+static char *trim_ascii(char *s) {
+    while (*s != '\0' && isspace((unsigned char)*s)) {
+        s++;
+    }
+
+    char *end = s + strlen(s);
+    while (end > s && isspace((unsigned char)end[-1])) {
+        end--;
+    }
+    *end = '\0';
+    return s;
+}
+
+int fdlb_parse_upstreams(char *text, char **paths, size_t max_paths, size_t *count) {
+    if (text == NULL || paths == NULL || count == NULL || max_paths == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    size_t n = 0;
+    char *cursor = text;
+    for (;;) {
+        char *comma = strchr(cursor, ',');
+        if (comma != NULL) {
+            *comma = '\0';
+        }
+
+        char *path = trim_ascii(cursor);
+        if (*path == '\0') {
+            errno = EINVAL;
+            return -1;
+        }
+        if (n >= max_paths) {
+            errno = E2BIG;
+            return -1;
+        }
+        paths[n++] = path;
+
+        if (comma == NULL) {
+            break;
+        }
+        cursor = comma + 1;
+    }
+
+    *count = n;
+    return 0;
+}
+
+size_t fdlb_round_robin_next(size_t *cursor, size_t count) {
+    if (cursor == NULL || count == 0) {
+        return 0;
+    }
+
+    size_t selected = *cursor % count;
+    *cursor = (*cursor + 1) % count;
+    return selected;
+}
+
+int fdlb_send_one_fd(int control_fd, int fd) {
+    char data[1] = {0};
+    char control[CMSG_SPACE(sizeof(int))];
+    struct iovec iov;
+    struct msghdr msg;
+
+    memset(control, 0, sizeof(control));
+    memset(&iov, 0, sizeof(iov));
+    memset(&msg, 0, sizeof(msg));
+
+    iov.iov_base = data;
+    iov.iov_len = sizeof(data);
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control;
+    msg.msg_controllen = sizeof(control);
+
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cmsg), &fd, sizeof(fd));
+
+    ssize_t n;
+    do {
+        n = sendmsg(control_fd, &msg, MSG_NOSIGNAL);
+    } while (n < 0 && errno == EINTR);
+
+    return n == (ssize_t)sizeof(data) ? 0 : -1;
+}
+
+static uint64_t monotonic_ms(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return ((uint64_t)ts.tv_sec * 1000ULL) + ((uint64_t)ts.tv_nsec / 1000000ULL);
+}
+
+static void sleep_ms(uint32_t ms) {
+    struct timespec ts;
+    ts.tv_sec = (time_t)(ms / 1000U);
+    ts.tv_nsec = (long)(ms % 1000U) * 1000000L;
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+    }
+}
+
+static int connect_unix_once(const char *path) {
+    if (path == NULL || strlen(path) >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        return -1;
+    }
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    memcpy(addr.sun_path, path, strlen(path) + 1U);
+
+    if (connect(fd, (const struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        int saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+    return fd;
+}
+
+static int connect_unix_with_retry(const char *path, uint32_t retry_ms, uint32_t timeout_ms) {
+    uint64_t start = monotonic_ms();
+    uint32_t sleep_for = retry_ms == 0U ? 25U : retry_ms;
+
+    for (;;) {
+        int fd = connect_unix_once(path);
+        if (fd >= 0) {
+            return fd;
+        }
+
+        uint64_t now = monotonic_ms();
+        if (timeout_ms != 0U && now >= start && now - start >= timeout_ms) {
+            return -1;
+        }
+        sleep_ms(sleep_for);
+    }
+}
+
+static int parse_listen_addr(const char *addr, uint16_t *port, struct in_addr *bind_addr) {
+    if (addr == NULL || *addr == '\0' || port == NULL || bind_addr == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    const char *port_text = addr;
+    char host[64];
+    host[0] = '\0';
+
+    const char *colon = strrchr(addr, ':');
+    if (colon != NULL) {
+        size_t host_len = (size_t)(colon - addr);
+        if (host_len >= sizeof(host)) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        memcpy(host, addr, host_len);
+        host[host_len] = '\0';
+        port_text = colon + 1;
+    }
+
+    if (*port_text == '\0') {
+        errno = EINVAL;
+        return -1;
+    }
+
+    char *end = NULL;
+    unsigned long parsed = strtoul(port_text, &end, 10);
+    if (end == port_text || *end != '\0' || parsed == 0UL || parsed > 65535UL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (host[0] == '\0' || strcmp(host, "0.0.0.0") == 0) {
+        bind_addr->s_addr = htonl(INADDR_ANY);
+    } else if (inet_pton(AF_INET, host, bind_addr) != 1) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    *port = (uint16_t)parsed;
+    return 0;
+}
+
+static int open_listen_socket(const char *listen_addr) {
+    uint16_t port = 0;
+    struct in_addr bind_addr;
+    if (parse_listen_addr(listen_addr, &port, &bind_addr) != 0) {
+        return -1;
+    }
+
+    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        return -1;
+    }
+
+    int enabled = 1;
+    (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled));
+#ifdef SO_REUSEPORT
+    (void)setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &enabled, sizeof(enabled));
+#endif
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr = bind_addr;
+    addr.sin_port = htons(port);
+
+    if (bind(fd, (const struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        int saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+
+    if (listen(fd, FDLB_LISTEN_BACKLOG) != 0) {
+        int saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+
+    return fd;
+}
+
+static int accept_client(int listen_fd) {
+    for (;;) {
+#ifdef __linux__
+        int fd = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
+#else
+        int fd = accept(listen_fd, NULL, NULL);
+#endif
+        if (fd >= 0) {
+            return fd;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        return -1;
+    }
+}
+
+static void tune_client_fd(int fd) {
+    int enabled = 1;
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled));
+#ifdef TCP_QUICKACK
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &enabled, sizeof(enabled));
+#endif
+}
+
+static bool reconnect_upstream(FdlbUpstream *upstream, uint32_t retry_ms, uint32_t timeout_ms) {
+    if (upstream->fd >= 0) {
+        close(upstream->fd);
+        upstream->fd = -1;
+    }
+
+    upstream->fd = connect_unix_with_retry(upstream->path, retry_ms, timeout_ms);
+    if (upstream->fd >= 0) {
+        upstream->reconnects++;
+        return true;
+    }
+    return false;
+}
+
+static bool deliver_fd(FdlbUpstream *upstreams, size_t upstream_count, size_t *cursor,
+                       int client_fd, uint32_t retry_ms) {
+    for (size_t attempt = 0; attempt < upstream_count; attempt++) {
+        size_t selected = fdlb_round_robin_next(cursor, upstream_count);
+        FdlbUpstream *upstream = &upstreams[selected];
+        if (upstream->fd < 0 && !reconnect_upstream(upstream, retry_ms, retry_ms * 4U)) {
+            upstream->failures++;
+            continue;
+        }
+
+        if (fdlb_send_one_fd(upstream->fd, client_fd) == 0) {
+            upstream->sent++;
+            return true;
+        }
+
+        upstream->failures++;
+        if (reconnect_upstream(upstream, retry_ms, retry_ms * 4U) &&
+            fdlb_send_one_fd(upstream->fd, client_fd) == 0) {
+            upstream->sent++;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+int fdlb_run(const FdlbConfig *config) {
+    if (config == NULL || config->listen_addr == NULL || config->upstreams == NULL) {
+        errno = EINVAL;
+        return 1;
+    }
+
+    char upstream_buffer[FDLB_UPSTREAMS_BUFFER_SIZE];
+    size_t upstreams_len = strlen(config->upstreams);
+    if (upstreams_len == 0U || upstreams_len >= sizeof(upstream_buffer)) {
+        fprintf(stderr, "invalid RINHA_FDPASS_UPSTREAMS\n");
+        return 1;
+    }
+    memcpy(upstream_buffer, config->upstreams, upstreams_len + 1U);
+
+    char *paths[FDLB_MAX_UPSTREAMS];
+    size_t upstream_count = 0;
+    if (fdlb_parse_upstreams(upstream_buffer, paths, FDLB_MAX_UPSTREAMS, &upstream_count) != 0) {
+        perror("parse upstreams");
+        return 1;
+    }
+
+    FdlbUpstream upstreams[FDLB_MAX_UPSTREAMS];
+    memset(upstreams, 0, sizeof(upstreams));
+    for (size_t i = 0; i < upstream_count; i++) {
+        upstreams[i].path = paths[i];
+        upstreams[i].fd = -1;
+        upstreams[i].fd = connect_unix_with_retry(paths[i],
+                                                  config->connect_retry_ms,
+                                                  config->startup_timeout_ms);
+        if (upstreams[i].fd < 0) {
+            fprintf(stderr, "failed to connect upstream %s: %s\n", paths[i], strerror(errno));
+            for (size_t j = 0; j < i; j++) {
+                close(upstreams[j].fd);
+            }
+            return 1;
+        }
+    }
+
+    int listen_fd = open_listen_socket(config->listen_addr);
+    if (listen_fd < 0) {
+        perror("listen");
+        for (size_t i = 0; i < upstream_count; i++) {
+            close(upstreams[i].fd);
+        }
+        return 1;
+    }
+
+    fprintf(stderr, "fdlb listening on %s with %zu upstreams\n",
+            config->listen_addr, upstream_count);
+
+    size_t cursor = 0;
+    for (;;) {
+        int client_fd = accept_client(listen_fd);
+        if (client_fd < 0) {
+            if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM) {
+                sleep_ms(1);
+                continue;
+            }
+            continue;
+        }
+
+        tune_client_fd(client_fd);
+        if (!deliver_fd(upstreams, upstream_count, &cursor, client_fd,
+                        config->connect_retry_ms == 0U ? 25U : config->connect_retry_ms)) {
+            close(client_fd);
+            continue;
+        }
+        close(client_fd);
+    }
+}

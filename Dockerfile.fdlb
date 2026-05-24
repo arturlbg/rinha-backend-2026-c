@@ -1,0 +1,21 @@
+FROM gcc:13-bookworm AS builder
+
+WORKDIR /src
+COPY Makefile ./
+COPY include ./include
+COPY src ./src
+
+RUN make clean && make fdlb
+
+FROM debian:bookworm-slim AS runtime
+
+WORKDIR /app
+COPY --from=builder /src/build/rinha-fdlb /app/rinha-fdlb
+
+ENV RINHA_LB_ADDR=:9999
+ENV RINHA_FDPASS_UPSTREAMS=/sockets/api1.ctrl,/sockets/api2.ctrl
+ENV RINHA_LB_CONNECT_RETRY_MS=25
+ENV RINHA_LB_STARTUP_TIMEOUT_MS=10000
+
+EXPOSE 9999
+ENTRYPOINT ["/app/rinha-fdlb"]
