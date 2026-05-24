@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
       args:
         MAKE_TARGET: "${RINHA_MAKE_TARGET:-all}"
-    image: "${RINHA_IMAGE:-rinha-c-phase9b:local}"
+    image: "${RINHA_IMAGE:-rinha-c-phase9c:local}"
     platform: linux/amd64
     ports:
       - "9999:8080"
@@ -35,8 +35,8 @@ services:
       - ./tmp/kdprimary/kdprimary-l32.bin:/app/resources/kdprimary.bin:ro
       - ./tmp/kdprimary2/kdprimary2-l64.bin:/app/resources/kdprimary2.bin:ro
       - ./tmp/kdtree/kdtree.bin:/app/resources/kdtree.bin:ro
-    cpus: "0.95"
-    mem_limit: 320m
+    cpus: "${RINHA_DIRECT_CPUS:-0.95}"
+    mem_limit: "${RINHA_DIRECT_MEM:-320m}"
     networks:
       - rinha
 

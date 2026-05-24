@@ -231,7 +231,9 @@ size_t metrics_write_text(const RinhaMetrics *metrics,
     used = appendf(out, cap, used, "open_connections=%llu\n", (unsigned long long)load_counter(&metrics->open_connections));
     used = appendf(out, cap, used, "max_open_connections=%llu\n", (unsigned long long)load_counter(&metrics->max_open_connections));
     used = appendf(out, cap, used, "accepted_connections=%llu\n", (unsigned long long)load_counter(&metrics->accepted_connections));
+    used = appendf(out, cap, used, "tcp_accept_count=%llu\n", (unsigned long long)load_counter(&metrics->tcp_accept_count));
     used = appendf(out, cap, used, "adopted_fds=%llu\n", (unsigned long long)load_counter(&metrics->adopted_fds));
+    used = appendf(out, cap, used, "fdpass_adopt_count=%llu\n", (unsigned long long)load_counter(&metrics->adopted_fds));
     used = appendf(out, cap, used, "closed_connections=%llu\n", (unsigned long long)load_counter(&metrics->closed_connections));
     used = appendf(out, cap, used, "request_count=%llu\n", (unsigned long long)load_counter(&metrics->request_count));
     used = appendf(out, cap, used, "ready_count=%llu\n", (unsigned long long)load_counter(&metrics->ready_count));
@@ -243,6 +245,8 @@ size_t metrics_write_text(const RinhaMetrics *metrics,
     used = appendf(out, cap, used, "read_errors=%llu\n", (unsigned long long)load_counter(&metrics->read_errors));
     used = appendf(out, cap, used, "write_errors=%llu\n", (unsigned long long)load_counter(&metrics->write_errors));
     used = appendf(out, cap, used, "malformed_requests=%llu\n", (unsigned long long)load_counter(&metrics->malformed_requests));
+    used = appendf(out, cap, used, "listener_accept_errors=%llu\n", (unsigned long long)load_counter(&metrics->listener_accept_errors));
+    used = appendf(out, cap, used, "epoll_add_errors=%llu\n", (unsigned long long)load_counter(&metrics->epoll_add_errors));
     used = appendf(out, cap, used, "fdpass_receive_errors=%llu\n", (unsigned long long)load_counter(&metrics->fdpass_receive_errors));
     used = appendf(out, cap, used, "fd_queue_enqueued=%llu\n", (unsigned long long)load_counter(&metrics->fd_queue_enqueued));
     used = appendf(out, cap, used, "fd_queue_dequeued=%llu\n", (unsigned long long)load_counter(&metrics->fd_queue_dequeued));
@@ -264,8 +268,19 @@ size_t metrics_write_text(const RinhaMetrics *metrics,
     used = appendf(out, cap, used, "kdprimary2_leaves_visited_max=%llu\n", (unsigned long long)load_counter(&metrics->kdprimary2_leaves_visited_max));
     used = appendf(out, cap, used, "kdprimary2_points_evaluated_max=%llu\n", (unsigned long long)load_counter(&metrics->kdprimary2_points_evaluated_max));
     used = appendf(out, cap, used, "kdprimary2_pruned_branches_max=%llu\n", (unsigned long long)load_counter(&metrics->kdprimary2_pruned_branches_max));
+    used = appendf(out, cap, used, "requests_per_connection_1=%llu\n", (unsigned long long)load_counter(&metrics->requests_per_connection_1));
+    used = appendf(out, cap, used, "requests_per_connection_2_5=%llu\n", (unsigned long long)load_counter(&metrics->requests_per_connection_2_5));
+    used = appendf(out, cap, used, "requests_per_connection_6_20=%llu\n", (unsigned long long)load_counter(&metrics->requests_per_connection_6_20));
+    used = appendf(out, cap, used, "requests_per_connection_gt20=%llu\n", (unsigned long long)load_counter(&metrics->requests_per_connection_gt20));
 
     used = append_histogram(out, cap, used, "request_total", &metrics->request_total);
+    used = append_histogram(out, cap, used, "accepted_to_first_epollin", &metrics->accepted_to_first_epollin);
+    used = append_histogram(out, cap, used, "accepted_to_first_read", &metrics->accepted_to_first_read);
+    used = append_histogram(out, cap, used, "adopted_to_first_epollin", &metrics->adopted_to_first_epollin);
+    used = append_histogram(out, cap, used, "adopted_to_first_read", &metrics->adopted_to_first_read);
+    used = append_histogram(out, cap, used, "first_read_to_header_complete", &metrics->first_read_to_header_complete);
+    used = append_histogram(out, cap, used, "header_complete_to_body_complete", &metrics->header_complete_to_body_complete);
+    used = append_histogram(out, cap, used, "request_complete_to_response_done", &metrics->request_complete_to_response_done);
     used = append_histogram(out, cap, used, "vectorize", &metrics->vectorize);
     used = append_histogram(out, cap, used, "search", &metrics->search);
     used = append_histogram(out, cap, used, "kdprimary2_search", &metrics->kdprimary2_search);
@@ -277,6 +292,7 @@ size_t metrics_write_text(const RinhaMetrics *metrics,
     used = append_value_histogram(out, cap, used, "kdprimary2_leaves_visited", &metrics->kdprimary2_leaves_visited);
     used = append_value_histogram(out, cap, used, "kdprimary2_points_evaluated", &metrics->kdprimary2_points_evaluated);
     used = append_value_histogram(out, cap, used, "kdprimary2_pruned_branches", &metrics->kdprimary2_pruned_branches);
+    used = append_value_histogram(out, cap, used, "requests_per_connection", &metrics->requests_per_connection);
 
     if (used > cap) {
         used = cap;

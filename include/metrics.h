@@ -23,6 +23,7 @@ typedef struct {
     atomic_uint_fast64_t open_connections;
     atomic_uint_fast64_t max_open_connections;
     atomic_uint_fast64_t accepted_connections;
+    atomic_uint_fast64_t tcp_accept_count;
     atomic_uint_fast64_t adopted_fds;
     atomic_uint_fast64_t closed_connections;
     atomic_uint_fast64_t request_count;
@@ -35,6 +36,8 @@ typedef struct {
     atomic_uint_fast64_t read_errors;
     atomic_uint_fast64_t write_errors;
     atomic_uint_fast64_t malformed_requests;
+    atomic_uint_fast64_t listener_accept_errors;
+    atomic_uint_fast64_t epoll_add_errors;
     atomic_uint_fast64_t fdpass_receive_errors;
     atomic_uint_fast64_t fd_queue_enqueued;
     atomic_uint_fast64_t fd_queue_dequeued;
@@ -56,8 +59,19 @@ typedef struct {
     atomic_uint_fast64_t kdprimary2_leaves_visited_max;
     atomic_uint_fast64_t kdprimary2_points_evaluated_max;
     atomic_uint_fast64_t kdprimary2_pruned_branches_max;
+    atomic_uint_fast64_t requests_per_connection_1;
+    atomic_uint_fast64_t requests_per_connection_2_5;
+    atomic_uint_fast64_t requests_per_connection_6_20;
+    atomic_uint_fast64_t requests_per_connection_gt20;
 
     RinhaMetricHistogram request_total;
+    RinhaMetricHistogram accepted_to_first_epollin;
+    RinhaMetricHistogram accepted_to_first_read;
+    RinhaMetricHistogram adopted_to_first_epollin;
+    RinhaMetricHistogram adopted_to_first_read;
+    RinhaMetricHistogram first_read_to_header_complete;
+    RinhaMetricHistogram header_complete_to_body_complete;
+    RinhaMetricHistogram request_complete_to_response_done;
     RinhaMetricHistogram vectorize;
     RinhaMetricHistogram search;
     RinhaMetricHistogram kdprimary2_search;
@@ -69,6 +83,7 @@ typedef struct {
     RinhaValueHistogram kdprimary2_leaves_visited;
     RinhaValueHistogram kdprimary2_points_evaluated;
     RinhaValueHistogram kdprimary2_pruned_branches;
+    RinhaValueHistogram requests_per_connection;
 } RinhaMetrics;
 
 void metrics_init(RinhaMetrics *metrics, bool enabled);

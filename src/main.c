@@ -334,7 +334,11 @@ int main(void) {
 
     int serve_result;
     if (strcmp(listen_mode, "tcp") == 0) {
-        serve_result = raw_http_serve(addr, &app);
+        if (exec_mode == FDPASS_EXEC_EPOLL) {
+            serve_result = raw_http_serve_epoll(addr, &app);
+        } else {
+            serve_result = raw_http_serve(addr, &app);
+        }
     } else if (strcmp(listen_mode, "fdpass") == 0) {
         serve_result = fdpass_serve(unix_socket, &app, &fdpass_opts);
     } else {

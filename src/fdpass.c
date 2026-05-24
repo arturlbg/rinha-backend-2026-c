@@ -315,6 +315,7 @@ static void *fdpass_epoll_thread(void *arg) {
                 if (metrics != NULL) {
                     metrics_inc(&metrics->epoll_read_events);
                 }
+                raw_http_conn_note_read_event(conn);
                 status = raw_http_conn_on_readable(conn);
             }
             if (status != RAW_HTTP_CONN_CLOSED &&

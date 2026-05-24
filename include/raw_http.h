@@ -18,7 +18,7 @@
 #define RAW_HTTP_CONN_WANT_READ 1u
 #define RAW_HTTP_CONN_WANT_WRITE 2u
 #define RAW_HTTP_CONN_CLOSED 4u
-#define RAW_HTTP_DEBUG_RESPONSE_BYTES 24576u
+#define RAW_HTTP_DEBUG_RESPONSE_BYTES 49152u
 
 typedef enum {
     RAW_HTTP_METHOD_OTHER = 0,
@@ -73,13 +73,21 @@ typedef struct {
     bool close_after_write;
     bool closed;
     uint64_t connection_start_ns;
+    uint64_t first_epollin_ns;
+    uint64_t first_read_ns;
+    uint64_t request_read_start_ns;
+    uint64_t request_header_complete_ns;
+    uint64_t request_complete_ns;
     uint64_t request_start_ns;
     uint64_t write_start_ns;
+    uint32_t requests_seen;
 } raw_http_conn;
 
 int raw_http_serve(const char *addr, const raw_http_app *app);
+int raw_http_serve_epoll(const char *addr, const raw_http_app *app);
 int raw_http_handle_connection(int client_fd, const raw_http_app *app);
 void raw_http_conn_init(raw_http_conn *conn, int client_fd, const raw_http_app *app);
+void raw_http_conn_note_read_event(raw_http_conn *conn);
 uint32_t raw_http_conn_on_readable(raw_http_conn *conn);
 uint32_t raw_http_conn_on_writable(raw_http_conn *conn);
 bool raw_http_conn_wants_write(const raw_http_conn *conn);

@@ -6,14 +6,15 @@ services:
       - "9999:9999"
     environment:
       RINHA_LB_ADDR: ":9999"
-      RINHA_FDPASS_UPSTREAMS: "/sockets/api1.ctrl,/sockets/api2.ctrl"
+      RINHA_FDPASS_UPSTREAMS: "/sockets/api1.ctrl,/sockets/api2.ctrl,/sockets/api3.ctrl"
     volumes:
       - sockets:/sockets
     depends_on:
       - api1
       - api2
-    cpus: "${RINHA_LB_CPUS:-0.05}"
-    mem_limit: "${RINHA_LB_MEM:-16m}"
+      - api3
+    cpus: "${RINHA_LB_CPUS:-0.04}"
+    mem_limit: "${RINHA_LB_MEM:-12m}"
     networks:
       - rinha
 
@@ -33,18 +34,18 @@ services:
       RINHA_KDPRIMARY_PATH: "/app/resources/kdprimary.bin"
       RINHA_KDPRIMARY_TOUCH: "${RINHA_KDPRIMARY_TOUCH:-false}"
       RINHA_KDPRIMARY2_PATH: "/app/resources/kdprimary2.bin"
-      RINHA_KDPRIMARY2_TOUCH: "${RINHA_KDPRIMARY2_TOUCH:-false}"
+      RINHA_KDPRIMARY2_TOUCH: "${RINHA_KDPRIMARY2_TOUCH:-true}"
       RINHA_KDTREE_PATH: "/app/resources/kdtree.bin"
       RINHA_KDTREE_REPAIR_ENABLED: "${RINHA_KDTREE_REPAIR_ENABLED:-false}"
       RINHA_KDTREE_REPAIR_POLICY: "${RINHA_KDTREE_REPAIR_POLICY:-boundary23_far45}"
       RINHA_INDEX_WARMUP: "${RINHA_INDEX_WARMUP:-off}"
       RINHA_INDEX_WARMUP_QUERIES: "${RINHA_INDEX_WARMUP_QUERIES:-2048}"
       RINHA_INDEX_MADVISE: "${RINHA_INDEX_MADVISE:-false}"
-      RINHA_SEARCH_IMPL: "${RINHA_SEARCH_IMPL:-scalar}"
+      RINHA_SEARCH_IMPL: "${RINHA_SEARCH_IMPL:-kdprimary2}"
       RINHA_IVF8_MAX_CANDIDATES: "4096"
       RINHA_IVF8_PROBES: "8"
       RINHA_METRICS_ENABLED: "${RINHA_METRICS_ENABLED:-false}"
-      RINHA_EXEC_MODE: "${RINHA_EXEC_MODE:-per_connection}"
+      RINHA_EXEC_MODE: "${RINHA_EXEC_MODE:-epoll}"
       RINHA_WORKERS: "${RINHA_WORKERS:-1}"
       RINHA_FD_QUEUE_SIZE: "${RINHA_FD_QUEUE_SIZE:-1024}"
     volumes:
@@ -53,8 +54,8 @@ services:
       - ./tmp/kdprimary/kdprimary-l32.bin:/app/resources/kdprimary.bin:ro
       - ./tmp/kdprimary2/kdprimary2-l64.bin:/app/resources/kdprimary2.bin:ro
       - ./tmp/kdtree/kdtree.bin:/app/resources/kdtree.bin:ro
-    cpus: "${RINHA_API_CPUS:-0.475}"
-    mem_limit: "${RINHA_API_MEM:-167m}"
+    cpus: "${RINHA_API_CPUS:-0.32}"
+    mem_limit: "${RINHA_API_MEM:-112m}"
     networks:
       - rinha
 
@@ -74,18 +75,18 @@ services:
       RINHA_KDPRIMARY_PATH: "/app/resources/kdprimary.bin"
       RINHA_KDPRIMARY_TOUCH: "${RINHA_KDPRIMARY_TOUCH:-false}"
       RINHA_KDPRIMARY2_PATH: "/app/resources/kdprimary2.bin"
-      RINHA_KDPRIMARY2_TOUCH: "${RINHA_KDPRIMARY2_TOUCH:-false}"
+      RINHA_KDPRIMARY2_TOUCH: "${RINHA_KDPRIMARY2_TOUCH:-true}"
       RINHA_KDTREE_PATH: "/app/resources/kdtree.bin"
       RINHA_KDTREE_REPAIR_ENABLED: "${RINHA_KDTREE_REPAIR_ENABLED:-false}"
       RINHA_KDTREE_REPAIR_POLICY: "${RINHA_KDTREE_REPAIR_POLICY:-boundary23_far45}"
       RINHA_INDEX_WARMUP: "${RINHA_INDEX_WARMUP:-off}"
       RINHA_INDEX_WARMUP_QUERIES: "${RINHA_INDEX_WARMUP_QUERIES:-2048}"
       RINHA_INDEX_MADVISE: "${RINHA_INDEX_MADVISE:-false}"
-      RINHA_SEARCH_IMPL: "${RINHA_SEARCH_IMPL:-scalar}"
+      RINHA_SEARCH_IMPL: "${RINHA_SEARCH_IMPL:-kdprimary2}"
       RINHA_IVF8_MAX_CANDIDATES: "4096"
       RINHA_IVF8_PROBES: "8"
       RINHA_METRICS_ENABLED: "${RINHA_METRICS_ENABLED:-false}"
-      RINHA_EXEC_MODE: "${RINHA_EXEC_MODE:-per_connection}"
+      RINHA_EXEC_MODE: "${RINHA_EXEC_MODE:-epoll}"
       RINHA_WORKERS: "${RINHA_WORKERS:-1}"
       RINHA_FD_QUEUE_SIZE: "${RINHA_FD_QUEUE_SIZE:-1024}"
     volumes:
@@ -94,8 +95,49 @@ services:
       - ./tmp/kdprimary/kdprimary-l32.bin:/app/resources/kdprimary.bin:ro
       - ./tmp/kdprimary2/kdprimary2-l64.bin:/app/resources/kdprimary2.bin:ro
       - ./tmp/kdtree/kdtree.bin:/app/resources/kdtree.bin:ro
-    cpus: "${RINHA_API_CPUS:-0.475}"
-    mem_limit: "${RINHA_API_MEM:-167m}"
+    cpus: "${RINHA_API_CPUS:-0.32}"
+    mem_limit: "${RINHA_API_MEM:-112m}"
+    networks:
+      - rinha
+
+  api3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        MAKE_TARGET: "${RINHA_MAKE_TARGET:-all}"
+    image: "${RINHA_IMAGE:-rinha-c-phase9c:local}"
+    platform: linux/amd64
+    user: "0:0"
+    environment:
+      RINHA_LISTEN_MODE: "fdpass"
+      RINHA_UNIX_SOCKET: "/sockets/api3.ctrl"
+      RINHA_INDEX_PATH: "/app/resources/index.bin"
+      RINHA_KDPRIMARY_PATH: "/app/resources/kdprimary.bin"
+      RINHA_KDPRIMARY_TOUCH: "${RINHA_KDPRIMARY_TOUCH:-false}"
+      RINHA_KDPRIMARY2_PATH: "/app/resources/kdprimary2.bin"
+      RINHA_KDPRIMARY2_TOUCH: "${RINHA_KDPRIMARY2_TOUCH:-true}"
+      RINHA_KDTREE_PATH: "/app/resources/kdtree.bin"
+      RINHA_KDTREE_REPAIR_ENABLED: "${RINHA_KDTREE_REPAIR_ENABLED:-false}"
+      RINHA_KDTREE_REPAIR_POLICY: "${RINHA_KDTREE_REPAIR_POLICY:-boundary23_far45}"
+      RINHA_INDEX_WARMUP: "${RINHA_INDEX_WARMUP:-off}"
+      RINHA_INDEX_WARMUP_QUERIES: "${RINHA_INDEX_WARMUP_QUERIES:-2048}"
+      RINHA_INDEX_MADVISE: "${RINHA_INDEX_MADVISE:-false}"
+      RINHA_SEARCH_IMPL: "${RINHA_SEARCH_IMPL:-kdprimary2}"
+      RINHA_IVF8_MAX_CANDIDATES: "4096"
+      RINHA_IVF8_PROBES: "8"
+      RINHA_METRICS_ENABLED: "${RINHA_METRICS_ENABLED:-false}"
+      RINHA_EXEC_MODE: "${RINHA_EXEC_MODE:-epoll}"
+      RINHA_WORKERS: "${RINHA_WORKERS:-1}"
+      RINHA_FD_QUEUE_SIZE: "${RINHA_FD_QUEUE_SIZE:-1024}"
+    volumes:
+      - sockets:/sockets
+      - ../rinha-2026-go/release/index.bin:/app/resources/index.bin:ro
+      - ./tmp/kdprimary/kdprimary-l32.bin:/app/resources/kdprimary.bin:ro
+      - ./tmp/kdprimary2/kdprimary2-l64.bin:/app/resources/kdprimary2.bin:ro
+      - ./tmp/kdtree/kdtree.bin:/app/resources/kdtree.bin:ro
+    cpus: "${RINHA_API_CPUS:-0.32}"
+    mem_limit: "${RINHA_API_MEM:-112m}"
     networks:
       - rinha
 

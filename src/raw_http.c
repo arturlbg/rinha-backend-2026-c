@@ -9,7 +9,9 @@
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -17,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -31,6 +34,25 @@ typedef struct {
     int client_fd;
     const raw_http_app *app;
 } connection_arg;
+
+typedef enum {
+    RAW_EPOLL_ITEM_LISTENER = 1,
+    RAW_EPOLL_ITEM_CONNECTION = 2
+} raw_epoll_item_kind;
+
+typedef struct {
+    raw_epoll_item_kind kind;
+} raw_epoll_item;
+
+typedef struct {
+    raw_epoll_item_kind kind;
+    int fd;
+} raw_epoll_listener_item;
+
+typedef struct {
+    raw_epoll_item_kind kind;
+    raw_http_conn conn;
+} raw_epoll_connection_item;
 
 static RinhaMetrics *app_metrics(const raw_http_app *app) {
     if (app == NULL || app->metrics == NULL || !app->metrics->enabled) {
@@ -76,6 +98,57 @@ static void metrics_note_kdprimary2_search(RinhaMetrics *metrics,
     metrics_observe_value(&metrics->kdprimary2_leaves_visited, result->stats.leaves_visited);
     metrics_observe_value(&metrics->kdprimary2_points_evaluated, result->stats.points_evaluated);
     metrics_observe_value(&metrics->kdprimary2_pruned_branches, result->stats.pruned_branches);
+}
+
+static void metrics_note_requests_per_connection(RinhaMetrics *metrics, uint32_t requests) {
+    if (metrics == NULL || requests == 0) {
+        return;
+    }
+    if (requests == 1) {
+        metrics_inc(&metrics->requests_per_connection_1);
+    } else if (requests <= 5) {
+        metrics_inc(&metrics->requests_per_connection_2_5);
+    } else if (requests <= 20) {
+        metrics_inc(&metrics->requests_per_connection_6_20);
+    } else {
+        metrics_inc(&metrics->requests_per_connection_gt20);
+    }
+    metrics_observe_value(&metrics->requests_per_connection, requests);
+}
+
+static void raw_http_conn_note_epollin(raw_http_conn *conn, RinhaMetrics *metrics, uint64_t now) {
+    if (conn == NULL || metrics == NULL || conn->first_epollin_ns != 0) {
+        return;
+    }
+    conn->first_epollin_ns = now;
+    if (conn->connection_start_ns != 0 && now >= conn->connection_start_ns) {
+        metrics_observe(&metrics->accepted_to_first_epollin, now - conn->connection_start_ns);
+        metrics_observe(&metrics->adopted_to_first_epollin, now - conn->connection_start_ns);
+    }
+}
+
+static void raw_http_conn_note_successful_read(raw_http_conn *conn, RinhaMetrics *metrics, uint64_t now) {
+    if (conn == NULL || metrics == NULL) {
+        return;
+    }
+    if (conn->first_read_ns == 0) {
+        conn->first_read_ns = now;
+        if (conn->connection_start_ns != 0 && now >= conn->connection_start_ns) {
+            metrics_observe(&metrics->accepted_to_first_read, now - conn->connection_start_ns);
+            metrics_observe(&metrics->adopted_to_first_read, now - conn->connection_start_ns);
+        }
+    }
+    if (conn->request_read_start_ns == 0) {
+        conn->request_read_start_ns = now;
+    }
+}
+
+void raw_http_conn_note_read_event(raw_http_conn *conn) {
+    RinhaMetrics *metrics = app_metrics(conn == NULL ? NULL : conn->app);
+    if (metrics == NULL) {
+        return;
+    }
+    raw_http_conn_note_epollin(conn, metrics, metrics_now_ns());
 }
 
 static int parse_port(const char *addr) {
@@ -675,6 +748,7 @@ void raw_http_conn_close(raw_http_conn *conn) {
     }
     conn->closed = true;
     if (metrics != NULL) {
+        metrics_note_requests_per_connection(metrics, conn->requests_seen);
         metrics_note_closed_connection(metrics);
         metrics_observe(&metrics->connection_lifetime, metrics_now_ns() - conn->connection_start_ns);
     }
@@ -726,12 +800,18 @@ static uint32_t raw_http_conn_flush(raw_http_conn *conn) {
             uint64_t now = metrics_now_ns();
             metrics_observe(&metrics->write_response, now - conn->write_start_ns);
             metrics_observe(&metrics->request_total, now - conn->request_start_ns);
+            if (conn->request_complete_ns != 0 && now >= conn->request_complete_ns) {
+                metrics_observe(&metrics->request_complete_to_response_done, now - conn->request_complete_ns);
+            }
         }
         conn->out_data = NULL;
         conn->out_len = 0;
         conn->out_pos = 0;
         conn->write_start_ns = 0;
         conn->request_start_ns = 0;
+        conn->request_read_start_ns = 0;
+        conn->request_header_complete_ns = 0;
+        conn->request_complete_ns = 0;
     }
 
     if (conn->close_after_write) {
@@ -755,6 +835,9 @@ static uint32_t raw_http_conn_process_buffer(raw_http_conn *conn) {
             conn->pos = 0;
             conn->used = 0;
             return RAW_HTTP_CONN_WANT_READ;
+        }
+        if (metrics != NULL && conn->request_read_start_ns == 0) {
+            conn->request_read_start_ns = metrics_now_ns();
         }
 
         ssize_t relative_header_end = raw_http_index_header_end(conn->buffer + conn->pos,
@@ -782,6 +865,7 @@ static uint32_t raw_http_conn_process_buffer(raw_http_conn *conn) {
 
         size_t header_start = conn->pos;
         size_t header_end = conn->pos + (size_t)relative_header_end;
+        uint64_t header_complete_ns = metrics != NULL ? metrics_now_ns() : 0u;
         parsed_request request;
         if (parse_request_header(conn->buffer + header_start, header_end - header_start, &request) != 0) {
             if (metrics != NULL) {
@@ -816,9 +900,19 @@ static uint32_t raw_http_conn_process_buffer(raw_http_conn *conn) {
             return RAW_HTTP_CONN_WANT_READ;
         }
 
+        uint64_t body_complete_ns = metrics != NULL ? metrics_now_ns() : 0u;
         if (metrics != NULL) {
+            conn->request_header_complete_ns = header_complete_ns;
+            conn->request_complete_ns = body_complete_ns;
+            if (conn->request_read_start_ns != 0 && header_complete_ns >= conn->request_read_start_ns) {
+                metrics_observe(&metrics->first_read_to_header_complete, header_complete_ns - conn->request_read_start_ns);
+            }
+            if (header_complete_ns != 0 && body_complete_ns >= header_complete_ns) {
+                metrics_observe(&metrics->header_complete_to_body_complete, body_complete_ns - header_complete_ns);
+            }
             metrics_inc(&metrics->request_count);
-            conn->request_start_ns = metrics_now_ns();
+            conn->requests_seen++;
+            conn->request_start_ns = body_complete_ns;
         }
 
         const char *response_data = NULL;
@@ -877,6 +971,9 @@ uint32_t raw_http_conn_on_readable(raw_http_conn *conn) {
 
         ssize_t n = recv(conn->fd, conn->buffer + conn->used, sizeof(conn->buffer) - conn->used, 0);
         if (n > 0) {
+            if (metrics != NULL) {
+                raw_http_conn_note_successful_read(conn, metrics, metrics_now_ns());
+            }
             conn->used += (size_t)n;
             uint32_t status = raw_http_conn_process_buffer(conn);
             if (status != RAW_HTTP_CONN_WANT_READ) {
@@ -920,7 +1017,24 @@ static void *connection_thread(void *arg) {
     return NULL;
 }
 
-int raw_http_serve(const char *addr, const raw_http_app *app) {
+static void tune_tcp_fd(int fd, bool nonblocking) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) {
+        if (nonblocking) {
+            (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        } else {
+            (void)fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+        }
+    }
+
+    int enabled = 1;
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled));
+#ifdef TCP_QUICKACK
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &enabled, sizeof(enabled));
+#endif
+}
+
+static int create_tcp_listener(const char *addr, bool nonblocking) {
     int port = parse_port(addr);
     if (port < 0) {
         errno = EINVAL;
@@ -934,6 +1048,9 @@ int raw_http_serve(const char *addr, const raw_http_app *app) {
 
     int enabled = 1;
     (void)setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled));
+    if (nonblocking) {
+        tune_tcp_fd(server_fd, true);
+    }
 
     struct sockaddr_in listen_addr;
     memset(&listen_addr, 0, sizeof(listen_addr));
@@ -947,6 +1064,14 @@ int raw_http_serve(const char *addr, const raw_http_app *app) {
     }
     if (listen(server_fd, RINHA_LISTEN_BACKLOG) < 0) {
         close(server_fd);
+        return -1;
+    }
+    return server_fd;
+}
+
+int raw_http_serve(const char *addr, const raw_http_app *app) {
+    int server_fd = create_tcp_listener(addr, false);
+    if (server_fd < 0) {
         return -1;
     }
 
@@ -963,7 +1088,9 @@ int raw_http_serve(const char *addr, const raw_http_app *app) {
         RinhaMetrics *metrics = app_metrics(app);
         if (metrics != NULL) {
             metrics_inc(&metrics->accepted_connections);
+            metrics_inc(&metrics->tcp_accept_count);
         }
+        tune_tcp_fd(client_fd, false);
 
         connection_arg *arg = (connection_arg *)malloc(sizeof(*arg));
         if (arg == NULL) {
@@ -979,5 +1106,207 @@ int raw_http_serve(const char *addr, const raw_http_app *app) {
             continue;
         }
         (void)pthread_detach(thread);
+    }
+}
+
+static void raw_epoll_note_open(RinhaMetrics *metrics) {
+    if (metrics == NULL) {
+        return;
+    }
+    metrics_inc(&metrics->epoll_registered_connections);
+    metrics_inc(&metrics->epoll_open_connections);
+    uint64_t open = atomic_load_explicit(&metrics->epoll_open_connections, memory_order_relaxed);
+    metrics_update_max(&metrics->epoll_max_open_connections, open);
+}
+
+static void raw_epoll_note_close(RinhaMetrics *metrics) {
+    if (metrics == NULL) {
+        return;
+    }
+    metrics_inc(&metrics->epoll_closed_connections);
+    metrics_dec(&metrics->epoll_open_connections);
+}
+
+static void raw_epoll_close_conn(int epoll_fd, raw_epoll_connection_item *item) {
+    if (item == NULL) {
+        return;
+    }
+    raw_http_conn *conn = &item->conn;
+    RinhaMetrics *metrics = app_metrics(conn->app);
+    if (epoll_fd >= 0 && conn->fd >= 0) {
+        (void)epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
+    }
+    raw_http_conn_close(conn);
+    raw_epoll_note_close(metrics);
+    free(item);
+}
+
+static int raw_epoll_update_interest(int epoll_fd, raw_http_conn *conn) {
+    struct epoll_event event;
+    memset(&event, 0, sizeof(event));
+    event.events = EPOLLIN | EPOLLRDHUP | EPOLLERR | EPOLLHUP;
+    if (raw_http_conn_wants_write(conn)) {
+        event.events |= EPOLLOUT;
+    }
+    event.data.ptr = (void *)((char *)conn - offsetof(raw_epoll_connection_item, conn));
+    return epoll_ctl(epoll_fd, EPOLL_CTL_MOD, conn->fd, &event);
+}
+
+static int raw_epoll_add_connection(int epoll_fd, int client_fd, const raw_http_app *app) {
+    tune_tcp_fd(client_fd, true);
+
+    raw_epoll_connection_item *item = (raw_epoll_connection_item *)malloc(sizeof(*item));
+    if (item == NULL) {
+        close(client_fd);
+        return -1;
+    }
+    item->kind = RAW_EPOLL_ITEM_CONNECTION;
+    raw_http_conn_init(&item->conn, client_fd, app);
+
+    struct epoll_event event;
+    memset(&event, 0, sizeof(event));
+    event.events = EPOLLIN | EPOLLRDHUP | EPOLLERR | EPOLLHUP;
+    event.data.ptr = item;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) != 0) {
+        RinhaMetrics *metrics = app_metrics(app);
+        if (metrics != NULL) {
+            metrics_inc(&metrics->epoll_add_errors);
+        }
+        raw_http_conn_close(&item->conn);
+        free(item);
+        return -1;
+    }
+    raw_epoll_note_open(app_metrics(app));
+    return 0;
+}
+
+static void raw_epoll_accept_ready(int epoll_fd, int server_fd, const raw_http_app *app) {
+    RinhaMetrics *metrics = app_metrics(app);
+    for (;;) {
+#ifdef SOCK_NONBLOCK
+        int client_fd = accept4(server_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+#else
+        int client_fd = accept(server_fd, NULL, NULL);
+#endif
+        if (client_fd < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return;
+            }
+            if (metrics != NULL) {
+                metrics_inc(&metrics->listener_accept_errors);
+            }
+            return;
+        }
+        if (metrics != NULL) {
+            metrics_inc(&metrics->accepted_connections);
+            metrics_inc(&metrics->tcp_accept_count);
+        }
+        if (raw_epoll_add_connection(epoll_fd, client_fd, app) != 0) {
+            continue;
+        }
+    }
+}
+
+int raw_http_serve_epoll(const char *addr, const raw_http_app *app) {
+    int server_fd = create_tcp_listener(addr, true);
+    if (server_fd < 0) {
+        return -1;
+    }
+
+    int epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+    if (epoll_fd < 0) {
+        close(server_fd);
+        return -1;
+    }
+
+    raw_epoll_listener_item listener = {
+        .kind = RAW_EPOLL_ITEM_LISTENER,
+        .fd = server_fd,
+    };
+    struct epoll_event event;
+    memset(&event, 0, sizeof(event));
+    event.events = EPOLLIN | EPOLLERR | EPOLLHUP;
+    event.data.ptr = &listener;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) != 0) {
+        close(epoll_fd);
+        close(server_fd);
+        return -1;
+    }
+
+    struct epoll_event events[128];
+    for (;;) {
+        int n = epoll_wait(epoll_fd, events, (int)(sizeof(events) / sizeof(events[0])), -1);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            close(epoll_fd);
+            close(server_fd);
+            return -1;
+        }
+
+        for (int i = 0; i < n; i++) {
+            raw_epoll_item *item = (raw_epoll_item *)events[i].data.ptr;
+            if (item == NULL) {
+                continue;
+            }
+            if (item->kind == RAW_EPOLL_ITEM_LISTENER) {
+                if ((events[i].events & (EPOLLERR | EPOLLHUP)) != 0) {
+                    close(epoll_fd);
+                    close(server_fd);
+                    return -1;
+                }
+                raw_epoll_accept_ready(epoll_fd, server_fd, app);
+                continue;
+            }
+
+            raw_epoll_connection_item *conn_item = (raw_epoll_connection_item *)item;
+            raw_http_conn *conn = &conn_item->conn;
+            if (conn->closed) {
+                continue;
+            }
+
+            uint32_t status = RAW_HTTP_CONN_WANT_READ;
+            if ((events[i].events & (EPOLLERR | EPOLLHUP)) != 0) {
+                raw_epoll_close_conn(epoll_fd, conn_item);
+                continue;
+            }
+            if ((events[i].events & EPOLLIN) != 0) {
+                RinhaMetrics *metrics = app_metrics(app);
+                if (metrics != NULL) {
+                    metrics_inc(&metrics->epoll_read_events);
+                }
+                raw_http_conn_note_read_event(conn);
+                status = raw_http_conn_on_readable(conn);
+            }
+            if (status != RAW_HTTP_CONN_CLOSED &&
+                (events[i].events & EPOLLOUT) != 0 &&
+                raw_http_conn_wants_write(conn)) {
+                RinhaMetrics *metrics = app_metrics(app);
+                if (metrics != NULL) {
+                    metrics_inc(&metrics->epoll_write_events);
+                }
+                status = raw_http_conn_on_writable(conn);
+            }
+
+            if (status == RAW_HTTP_CONN_CLOSED || conn->closed) {
+                raw_epoll_close_conn(epoll_fd, conn_item);
+                continue;
+            }
+            if ((events[i].events & EPOLLRDHUP) != 0 && !raw_http_conn_wants_write(conn)) {
+                raw_epoll_close_conn(epoll_fd, conn_item);
+                continue;
+            }
+            if (raw_epoll_update_interest(epoll_fd, conn) != 0) {
+                RinhaMetrics *metrics = app_metrics(app);
+                if (metrics != NULL) {
+                    metrics_inc(&metrics->epoll_add_errors);
+                }
+                raw_epoll_close_conn(epoll_fd, conn_item);
+            }
+        }
     }
 }
