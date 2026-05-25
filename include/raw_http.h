@@ -62,6 +62,7 @@ typedef struct {
 
 typedef struct {
     int fd;
+    int close_feedback_fd;
     const raw_http_app *app;
     char buffer[RINHA_MAX_REQUEST_BYTES];
     size_t used;

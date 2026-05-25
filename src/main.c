@@ -159,8 +159,10 @@ int main(void) {
     uint32_t workers = env_u32("RINHA_WORKERS", RINHA_DEFAULT_WORKERS);
     uint32_t queue_size = env_u32("RINHA_FD_QUEUE_SIZE", RINHA_DEFAULT_FD_QUEUE_SIZE);
 
+#if RINHA_ENABLE_METRICS
     RinhaMetrics metrics;
     metrics_init(&metrics, metrics_parse_enabled(getenv("RINHA_METRICS_ENABLED")));
+#endif
 
     const char *index_path = getenv("RINHA_INDEX_PATH");
     if (index_path == NULL || index_path[0] == '\0') {
@@ -315,7 +317,11 @@ int main(void) {
         },
         .kdtree_repair_enabled = kdtree_repair_enabled,
         .kdtree_repair_policy = kdtree_policy,
+#if RINHA_ENABLE_METRICS
         .metrics = &metrics,
+#else
+        .metrics = NULL,
+#endif
         .listen_mode = listen_mode,
         .exec_mode = exec_mode_text,
         .workers = workers,

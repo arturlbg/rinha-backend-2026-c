@@ -55,10 +55,15 @@ typedef struct {
 } raw_epoll_connection_item;
 
 static RinhaMetrics *app_metrics(const raw_http_app *app) {
+#if RINHA_ENABLE_METRICS
     if (app == NULL || app->metrics == NULL || !app->metrics->enabled) {
         return NULL;
     }
     return app->metrics;
+#else
+    (void)app;
+    return NULL;
+#endif
 }
 
 static void metrics_note_open_connection(RinhaMetrics *metrics) {
@@ -727,6 +732,7 @@ static void raw_http_conn_compact(raw_http_conn *conn) {
 void raw_http_conn_init(raw_http_conn *conn, int client_fd, const raw_http_app *app) {
     memset(conn, 0, sizeof(*conn));
     conn->fd = client_fd;
+    conn->close_feedback_fd = -1;
     conn->app = app;
     RinhaMetrics *metrics = app_metrics(app);
     conn->connection_start_ns = metrics != NULL ? metrics_now_ns() : 0u;

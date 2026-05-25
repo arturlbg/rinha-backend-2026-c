@@ -2,12 +2,14 @@
 
 FROM --platform=$BUILDPLATFORM gcc:13-bookworm AS build
 WORKDIR /src
+ARG CFLAGS_PROFILE=pre10b
+ARG RINHA_ENABLE_METRICS=1
 
 COPY Makefile ./
 COPY include ./include
 COPY src ./src
 
-RUN make release
+RUN make clean && make all CFLAGS_PROFILE=${CFLAGS_PROFILE} RINHA_ENABLE_METRICS=${RINHA_ENABLE_METRICS}
 
 FROM debian:bookworm-slim AS runtime
 WORKDIR /app

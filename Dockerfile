@@ -3,6 +3,8 @@
 FROM --platform=$BUILDPLATFORM gcc:13-bookworm AS build
 WORKDIR /src
 ARG MAKE_TARGET=all
+ARG CFLAGS_PROFILE=current
+ARG RINHA_ENABLE_METRICS=1
 
 COPY Makefile ./
 COPY include ./include
@@ -10,7 +12,7 @@ COPY src ./src
 COPY tests ./tests
 COPY tools ./tools
 
-RUN make clean && make ${MAKE_TARGET}
+RUN make clean && make ${MAKE_TARGET} CFLAGS_PROFILE=${CFLAGS_PROFILE} RINHA_ENABLE_METRICS=${RINHA_ENABLE_METRICS}
 
 FROM build AS test
 RUN make test

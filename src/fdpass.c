@@ -24,6 +24,7 @@
 
 typedef struct {
     int client_fd;
+    int feedback_fd;
     const raw_http_app *app;
 } fdpass_client_arg;
 
@@ -40,6 +41,8 @@ typedef struct fdpass_runtime {
     int epoll_fd;
     bool epoll_ready;
 } fdpass_runtime;
+
+#define FDPASS_FEEDBACK_BYTE 'C'
 
 static int mkdir_parent(const char *path) {
     const char *slash = strrchr(path, '/');
@@ -77,6 +80,18 @@ static void tune_client_fd(int fd, bool nonblocking) {
 #ifdef TCP_QUICKACK
     (void)setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &enabled, sizeof(enabled));
 #endif
+}
+
+static void send_close_feedback(int feedback_fd) {
+    if (feedback_fd < 0) {
+        return;
+    }
+    char byte = FDPASS_FEEDBACK_BYTE;
+    ssize_t n;
+    do {
+        n = send(feedback_fd, &byte, sizeof(byte), MSG_NOSIGNAL | MSG_DONTWAIT);
+    } while (n < 0 && errno == EINTR);
+    (void)n;
 }
 
 int fdpass_recv_one_fd(int control_fd) {
@@ -172,30 +187,38 @@ int fdpass_send_one_fd(int control_fd, int fd) {
 static void *fdpass_client_thread(void *arg) {
     fdpass_client_arg *client = (fdpass_client_arg *)arg;
     int client_fd = client->client_fd;
+    int feedback_fd = client->feedback_fd;
     const raw_http_app *app = client->app;
     free(client);
 
     tune_client_fd(client_fd, false);
     (void)raw_http_handle_connection(client_fd, app);
     close(client_fd);
+    send_close_feedback(feedback_fd);
     return NULL;
 }
 
 static RinhaMetrics *runtime_metrics(const fdpass_runtime *runtime) {
+#if RINHA_ENABLE_METRICS
     if (runtime == NULL || runtime->app == NULL ||
         runtime->app->metrics == NULL || !runtime->app->metrics->enabled) {
         return NULL;
     }
     return runtime->app->metrics;
+#else
+    (void)runtime;
+    return NULL;
+#endif
 }
 
-static void start_client_thread(int client_fd, const raw_http_app *app) {
+static void start_client_thread(int client_fd, int feedback_fd, const raw_http_app *app) {
     fdpass_client_arg *arg = (fdpass_client_arg *)malloc(sizeof(*arg));
     if (arg == NULL) {
         close(client_fd);
         return;
     }
     arg->client_fd = client_fd;
+    arg->feedback_fd = feedback_fd;
     arg->app = app;
 
     pthread_t thread;
@@ -207,10 +230,11 @@ static void start_client_thread(int client_fd, const raw_http_app *app) {
     (void)pthread_detach(thread);
 }
 
-static void handle_client_fd(int client_fd, const raw_http_app *app) {
+static void handle_client_fd(int client_fd, int feedback_fd, const raw_http_app *app) {
     tune_client_fd(client_fd, false);
     (void)raw_http_handle_connection(client_fd, app);
     close(client_fd);
+    send_close_feedback(feedback_fd);
 }
 
 static void *fdpass_worker_thread(void *arg) {
@@ -225,7 +249,7 @@ static void *fdpass_worker_thread(void *arg) {
             metrics_inc(&metrics->fd_queue_dequeued);
             metrics_observe(&metrics->queue_wait, metrics_now_ns() - item.enqueued_ns);
         }
-        handle_client_fd(item.fd, runtime->app);
+        handle_client_fd(item.fd, item.feedback_fd, runtime->app);
     }
     return NULL;
 }
@@ -270,7 +294,9 @@ static void close_epoll_conn(fdpass_runtime *runtime, raw_http_conn *conn) {
     if (runtime->epoll_fd >= 0 && conn->fd >= 0) {
         (void)epoll_ctl(runtime->epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
     }
+    int feedback_fd = conn->close_feedback_fd;
     raw_http_conn_close(conn);
+    send_close_feedback(feedback_fd);
     epoll_note_close(runtime_metrics(runtime));
     free(conn);
 }
@@ -361,7 +387,7 @@ static int start_epoll_thread(fdpass_runtime *runtime) {
     return 0;
 }
 
-static void dispatch_epoll_client_fd(fdpass_runtime *runtime, int client_fd) {
+static void dispatch_epoll_client_fd(fdpass_runtime *runtime, int client_fd, int feedback_fd) {
     tune_client_fd(client_fd, true);
 
     raw_http_conn *conn = (raw_http_conn *)malloc(sizeof(*conn));
@@ -370,6 +396,7 @@ static void dispatch_epoll_client_fd(fdpass_runtime *runtime, int client_fd) {
         return;
     }
     raw_http_conn_init(conn, client_fd, runtime->app);
+    conn->close_feedback_fd = feedback_fd;
 
     struct epoll_event event;
     memset(&event, 0, sizeof(event));
@@ -383,20 +410,20 @@ static void dispatch_epoll_client_fd(fdpass_runtime *runtime, int client_fd) {
     epoll_note_open(runtime_metrics(runtime));
 }
 
-static void dispatch_client_fd(fdpass_runtime *runtime, int client_fd) {
+static void dispatch_client_fd(fdpass_runtime *runtime, int client_fd, int feedback_fd) {
     RinhaMetrics *metrics = runtime_metrics(runtime);
     if (metrics != NULL) {
         metrics_inc(&metrics->adopted_fds);
     }
 
     if (runtime->options.exec_mode == FDPASS_EXEC_EPOLL) {
-        dispatch_epoll_client_fd(runtime, client_fd);
+        dispatch_epoll_client_fd(runtime, client_fd, feedback_fd);
         return;
     }
 
     if (runtime->options.exec_mode == FDPASS_EXEC_WORKER_POOL) {
         uint64_t now = metrics != NULL ? metrics_now_ns() : 0u;
-        if (fd_queue_push(&runtime->queue, client_fd, now)) {
+        if (fd_queue_push_with_feedback(&runtime->queue, client_fd, feedback_fd, now)) {
             if (metrics != NULL) {
                 metrics_inc(&metrics->fd_queue_enqueued);
             }
@@ -409,7 +436,7 @@ static void dispatch_client_fd(fdpass_runtime *runtime, int client_fd) {
         return;
     }
 
-    start_client_thread(client_fd, runtime->app);
+    start_client_thread(client_fd, feedback_fd, runtime->app);
 }
 
 static void *fdpass_control_thread(void *arg) {
@@ -426,7 +453,7 @@ static void *fdpass_control_thread(void *arg) {
             metrics_observe(&metrics->fdpass_receive, metrics_now_ns() - start);
         }
         if (client_fd >= 0) {
-            dispatch_client_fd(runtime, client_fd);
+            dispatch_client_fd(runtime, client_fd, control_fd);
             continue;
         }
         if (metrics != NULL && client_fd != -2) {

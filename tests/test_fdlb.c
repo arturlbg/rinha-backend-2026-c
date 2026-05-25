@@ -67,6 +67,40 @@ static void test_round_robin(void) {
     assert(cursor == 1);
 }
 
+static void test_strategy_parse(void) {
+    FdlbStrategy strategy = FDLB_STRATEGY_ROUND_ROBIN;
+    assert(fdlb_parse_strategy(NULL, &strategy));
+    assert(strategy == FDLB_STRATEGY_ROUND_ROBIN);
+    assert(fdlb_parse_strategy("least_active", &strategy));
+    assert(strategy == FDLB_STRATEGY_LEAST_ACTIVE);
+    assert(fdlb_parse_strategy("power_of_two", &strategy));
+    assert(strategy == FDLB_STRATEGY_POWER_OF_TWO);
+    assert(!fdlb_parse_strategy("bogus", &strategy));
+}
+
+static void test_strategy_select(void) {
+    uint32_t active[3] = {5, 1, 1};
+    size_t cursor = 0;
+    assert(fdlb_select_upstream(FDLB_STRATEGY_LEAST_ACTIVE, &cursor, active, 3) == 1);
+    assert(cursor == 2);
+    assert(fdlb_select_upstream(FDLB_STRATEGY_LEAST_ACTIVE, &cursor, active, 3) == 2);
+
+    active[0] = 9;
+    active[1] = 2;
+    cursor = 0;
+    assert(fdlb_select_upstream(FDLB_STRATEGY_POWER_OF_TWO, &cursor, active, 2) == 1);
+}
+
+static void test_feedback_decrement(void) {
+    uint32_t active = 2;
+    fdlb_decrement_active(&active);
+    assert(active == 1);
+    fdlb_decrement_active(&active);
+    assert(active == 0);
+    fdlb_decrement_active(&active);
+    assert(active == 0);
+}
+
 static void test_send_fd(void) {
     int sv[2];
     int pipefd[2];
@@ -94,6 +128,9 @@ static void test_send_fd(void) {
 int main(void) {
     test_parse_upstreams();
     test_round_robin();
+    test_strategy_parse();
+    test_strategy_select();
+    test_feedback_decrement();
     test_send_fd();
     return 0;
 }

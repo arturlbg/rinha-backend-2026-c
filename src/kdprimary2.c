@@ -120,6 +120,28 @@ uint64_t kdprimary2_bbox_distance(const KdPrimary2Node *node, const int16_t quer
     return sum;
 }
 
+static uint64_t kdprimary2_bbox_distance_limit(const KdPrimary2Node *node,
+                                               const int16_t query[IVF8_INDEX_DIMS],
+                                               uint64_t limit) {
+    uint64_t sum = 0;
+    if (node == NULL || query == NULL) {
+        return UINT64_MAX;
+    }
+    for (uint32_t dim = 0; dim < IVF8_INDEX_DIMS; dim++) {
+        int64_t diff = 0;
+        if (query[dim] < node->bbox_min[dim]) {
+            diff = (int64_t)node->bbox_min[dim] - (int64_t)query[dim];
+        } else if (query[dim] > node->bbox_max[dim]) {
+            diff = (int64_t)query[dim] - (int64_t)node->bbox_max[dim];
+        }
+        sum += (uint64_t)(diff * diff);
+        if (sum > limit) {
+            return sum;
+        }
+    }
+    return sum;
+}
+
 void kdprimary2_leaf_block_distances_avx2(const int16_t *block_data,
                                           uint32_t block,
                                           const int16_t query[IVF8_INDEX_DIMS],
@@ -798,16 +820,17 @@ KdPrimary2SearchResult kdprimary2_search_top5(const KdPrimary2Index *index,
 
         uint32_t left = node->left;
         uint32_t right = node->right;
-        uint64_t left_bound = left != KDPRIMARY2_INVALID_NODE ? kdprimary2_bbox_distance(&index->nodes[left], query) : UINT64_MAX;
-        uint64_t right_bound = right != KDPRIMARY2_INVALID_NODE ? kdprimary2_bbox_distance(&index->nodes[right], query) : UINT64_MAX;
+        uint64_t worst = result.top[KDPRIMARY2_TOP_K - 1u].distance;
+        bool full = top_full(result.top);
+        uint64_t limit = full ? worst : UINT64_MAX;
+        uint64_t left_bound = left != KDPRIMARY2_INVALID_NODE ? kdprimary2_bbox_distance_limit(&index->nodes[left], query, limit) : UINT64_MAX;
+        uint64_t right_bound = right != KDPRIMARY2_INVALID_NODE ? kdprimary2_bbox_distance_limit(&index->nodes[right], query, limit) : UINT64_MAX;
 
         uint32_t near_node = left_bound <= right_bound ? left : right;
         uint32_t far_node = left_bound <= right_bound ? right : left;
         uint64_t near_bound = left_bound <= right_bound ? left_bound : right_bound;
         uint64_t far_bound = left_bound <= right_bound ? right_bound : left_bound;
 
-        uint64_t worst = result.top[KDPRIMARY2_TOP_K - 1u].distance;
-        bool full = top_full(result.top);
         if (!full || far_bound <= worst) {
             if (!push_node(stack, &stack_len, far_node, far_bound, &result)) {
                 result.stats.pruned_branches++;

@@ -6,6 +6,7 @@
 
 typedef struct {
     int fd;
+    int feedback_fd;
     uint64_t enqueued_ns;
 } FdQueueItem;
 
@@ -23,6 +24,7 @@ typedef struct {
 int fd_queue_init(FdQueue *queue, uint32_t capacity);
 void fd_queue_destroy(FdQueue *queue);
 bool fd_queue_push(FdQueue *queue, int fd, uint64_t enqueued_ns);
+bool fd_queue_push_with_feedback(FdQueue *queue, int fd, int feedback_fd, uint64_t enqueued_ns);
 bool fd_queue_pop(FdQueue *queue, FdQueueItem *out);
 void fd_queue_close(FdQueue *queue);
 

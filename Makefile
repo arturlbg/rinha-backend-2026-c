@@ -3,6 +3,32 @@ CFLAGS ?= -O2 -std=c11 -Wall -Wextra -Werror -pedantic
 CPPFLAGS ?= -Iinclude
 LDFLAGS ?=
 AVX2_CFLAGS ?= -mavx2
+CFLAGS_PROFILE ?= current
+RINHA_ENABLE_METRICS ?= 1
+PGO_DIR ?= $(BUILD_DIR)/pgo
+
+CPPFLAGS += -DRINHA_ENABLE_METRICS=$(RINHA_ENABLE_METRICS)
+
+ifeq ($(CFLAGS_PROFILE),current)
+else ifeq ($(CFLAGS_PROFILE),pre10b)
+CFLAGS += -O3 -DNDEBUG -flto
+LDFLAGS += -flto
+else ifeq ($(CFLAGS_PROFILE),o3)
+CFLAGS += -O3 -DNDEBUG -fomit-frame-pointer
+else ifeq ($(CFLAGS_PROFILE),lto)
+CFLAGS += -O3 -DNDEBUG -fomit-frame-pointer -flto
+LDFLAGS += -flto
+else ifeq ($(CFLAGS_PROFILE),v3)
+CFLAGS += -O3 -DNDEBUG -fomit-frame-pointer -march=x86-64-v3
+else ifeq ($(CFLAGS_PROFILE),pgo-generate)
+CFLAGS += -O3 -DNDEBUG -fomit-frame-pointer -fprofile-generate=$(PGO_DIR)
+LDFLAGS += -fprofile-generate=$(PGO_DIR)
+else ifeq ($(CFLAGS_PROFILE),pgo-use)
+CFLAGS += -O3 -DNDEBUG -fomit-frame-pointer -fprofile-use=$(PGO_DIR) -fprofile-correction -Wno-error=missing-profile -Wno-error=coverage-mismatch
+LDFLAGS += -fprofile-use=$(PGO_DIR) -fprofile-correction
+else
+$(error unknown CFLAGS_PROFILE '$(CFLAGS_PROFILE)')
+endif
 
 BUILD_DIR := build
 TARGET := $(BUILD_DIR)/rinha-api
@@ -58,15 +84,19 @@ BUILD_KDPRIMARY2_SOURCES := tools/build_kdprimary2.c src/kdprimary2.c src/ivf8_i
 EVALUATE_KDPRIMARY2_TARGET := $(BUILD_DIR)/evaluate_kdprimary2
 EVALUATE_KDPRIMARY2_SOURCES := tools/evaluate_kdprimary2.c src/kdprimary2.c src/fastvector.c src/ivf8_search.c
 
-.PHONY: all clean fdlb test tools release
+.PHONY: all clean fdlb fdlb-release test tools release
 
 all: $(TARGET)
 
 fdlb: $(FDLB_TARGET)
 
-release: CFLAGS += -O3 -DNDEBUG -flto
-release: LDFLAGS += -flto
-release: clean all
+release:
+	$(MAKE) clean
+	$(MAKE) all CFLAGS_PROFILE=pre10b RINHA_ENABLE_METRICS=1
+
+fdlb-release:
+	$(MAKE) clean
+	$(MAKE) fdlb CFLAGS_PROFILE=current RINHA_ENABLE_METRICS=1
 
 $(TARGET): $(OBJECTS)
 	$(CC) $(OBJECTS) -pthread $(LDFLAGS) -o $@

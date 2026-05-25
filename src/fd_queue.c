@@ -63,7 +63,7 @@ void fd_queue_destroy(FdQueue *queue) {
     memset(queue, 0, sizeof(*queue));
 }
 
-bool fd_queue_push(FdQueue *queue, int fd, uint64_t enqueued_ns) {
+bool fd_queue_push_with_feedback(FdQueue *queue, int fd, int feedback_fd, uint64_t enqueued_ns) {
     FdQueueSync *sync = queue_sync(queue);
     if (queue == NULL || sync == NULL || queue->items == NULL) {
         return false;
@@ -76,12 +76,17 @@ bool fd_queue_push(FdQueue *queue, int fd, uint64_t enqueued_ns) {
     }
 
     queue->items[queue->tail].fd = fd;
+    queue->items[queue->tail].feedback_fd = feedback_fd;
     queue->items[queue->tail].enqueued_ns = enqueued_ns;
     queue->tail = (queue->tail + 1u) % queue->capacity;
     queue->count++;
     pthread_cond_signal(&sync->cond);
     pthread_mutex_unlock(&sync->mutex);
     return true;
+}
+
+bool fd_queue_push(FdQueue *queue, int fd, uint64_t enqueued_ns) {
+    return fd_queue_push_with_feedback(queue, fd, -1, enqueued_ns);
 }
 
 bool fd_queue_pop(FdQueue *queue, FdQueueItem *out) {

@@ -7,6 +7,8 @@ services:
     environment:
       RINHA_LB_ADDR: ":9999"
       RINHA_FDPASS_UPSTREAMS: "/sockets/api1.ctrl,/sockets/api2.ctrl"
+      RINHA_FDLB_STRATEGY: "${RINHA_FDLB_STRATEGY:-round_robin}"
+      RINHA_FDLB_METRICS: "${RINHA_FDLB_METRICS:-false}"
       RINHA_LB_CONNECT_RETRY_MS: "${RINHA_LB_CONNECT_RETRY_MS:-25}"
       RINHA_LB_STARTUP_TIMEOUT_MS: "${RINHA_LB_STARTUP_TIMEOUT_MS:-10000}"
     volumes:
