@@ -34,7 +34,10 @@ services:
       RINHA_KDPRIMARY2_PATH: "/app/resources/kdprimary2.bin"
       RINHA_KDPRIMARY2_TOUCH: "true"
       RINHA_EXEC_MODE: "epoll"
-      RINHA_METRICS_ENABLED: "false"
+      RINHA_API_PROCESS_MODE: "${RINHA_API_PROCESS_MODE:-sync}"
+      RINHA_API_WORKERS: "${RINHA_API_WORKERS:-1}"
+      RINHA_FD_QUEUE_SIZE: "${RINHA_FD_QUEUE_SIZE:-1024}"
+      RINHA_METRICS_ENABLED: "${RINHA_METRICS_ENABLED:-false}"
     volumes:
       - sockets:/sockets
     healthcheck:
@@ -59,7 +62,10 @@ services:
       RINHA_KDPRIMARY2_PATH: "/app/resources/kdprimary2.bin"
       RINHA_KDPRIMARY2_TOUCH: "true"
       RINHA_EXEC_MODE: "epoll"
-      RINHA_METRICS_ENABLED: "false"
+      RINHA_API_PROCESS_MODE: "${RINHA_API_PROCESS_MODE:-sync}"
+      RINHA_API_WORKERS: "${RINHA_API_WORKERS:-1}"
+      RINHA_FD_QUEUE_SIZE: "${RINHA_FD_QUEUE_SIZE:-1024}"
+      RINHA_METRICS_ENABLED: "${RINHA_METRICS_ENABLED:-false}"
     volumes:
       - sockets:/sockets
     healthcheck:

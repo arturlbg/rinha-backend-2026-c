@@ -272,6 +272,11 @@ size_t metrics_write_text(const RinhaMetrics *metrics,
     used = appendf(out, cap, used, "requests_per_connection_2_5=%llu\n", (unsigned long long)load_counter(&metrics->requests_per_connection_2_5));
     used = appendf(out, cap, used, "requests_per_connection_6_20=%llu\n", (unsigned long long)load_counter(&metrics->requests_per_connection_6_20));
     used = appendf(out, cap, used, "requests_per_connection_gt20=%llu\n", (unsigned long long)load_counter(&metrics->requests_per_connection_gt20));
+    used = appendf(out, cap, used, "async_jobs_enqueued=%llu\n", (unsigned long long)load_counter(&metrics->async_jobs_enqueued));
+    used = appendf(out, cap, used, "async_jobs_completed=%llu\n", (unsigned long long)load_counter(&metrics->async_jobs_completed));
+    used = appendf(out, cap, used, "async_job_queue_full=%llu\n", (unsigned long long)load_counter(&metrics->async_job_queue_full));
+    used = appendf(out, cap, used, "async_sync_fallback=%llu\n", (unsigned long long)load_counter(&metrics->async_sync_fallback));
+    used = appendf(out, cap, used, "async_worker_count=%llu\n", (unsigned long long)load_counter(&metrics->async_worker_count));
 
     used = append_histogram(out, cap, used, "request_total", &metrics->request_total);
     used = append_histogram(out, cap, used, "accepted_to_first_epollin", &metrics->accepted_to_first_epollin);
@@ -288,6 +293,9 @@ size_t metrics_write_text(const RinhaMetrics *metrics,
     used = append_histogram(out, cap, used, "connection_lifetime", &metrics->connection_lifetime);
     used = append_histogram(out, cap, used, "fdpass_receive", &metrics->fdpass_receive);
     used = append_histogram(out, cap, used, "queue_wait", &metrics->queue_wait);
+    used = append_histogram(out, cap, used, "async_job_wait", &metrics->async_job_wait);
+    used = append_histogram(out, cap, used, "async_job_compute", &metrics->async_job_compute);
+    used = append_histogram(out, cap, used, "async_completion_to_write", &metrics->async_completion_to_write);
     used = append_value_histogram(out, cap, used, "kdprimary2_nodes_visited", &metrics->kdprimary2_nodes_visited);
     used = append_value_histogram(out, cap, used, "kdprimary2_leaves_visited", &metrics->kdprimary2_leaves_visited);
     used = append_value_histogram(out, cap, used, "kdprimary2_points_evaluated", &metrics->kdprimary2_points_evaluated);

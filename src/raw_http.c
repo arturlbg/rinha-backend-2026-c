@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -35,9 +36,37 @@ typedef struct {
     const raw_http_app *app;
 } connection_arg;
 
+typedef struct {
+    raw_http_conn *conn;
+    uint64_t generation;
+    const raw_http_app *app;
+    int16_t query[FASTVECTOR_DIMENSIONS];
+    uint64_t enqueue_ns;
+} raw_http_async_job;
+
+struct raw_http_async_runtime {
+    pthread_mutex_t mutex;
+    pthread_cond_t not_empty;
+    raw_http_async_job *jobs;
+    raw_http_async_completion *completions;
+    pthread_t *threads;
+    uint32_t worker_count;
+    uint32_t queue_capacity;
+    uint32_t completion_capacity;
+    uint32_t job_head;
+    uint32_t job_tail;
+    uint32_t job_count;
+    uint32_t completion_head;
+    uint32_t completion_tail;
+    uint32_t completion_count;
+    int event_fd;
+    bool shutting_down;
+};
+
 typedef enum {
     RAW_EPOLL_ITEM_LISTENER = 1,
-    RAW_EPOLL_ITEM_CONNECTION = 2
+    RAW_EPOLL_ITEM_CONNECTION = 2,
+    RAW_EPOLL_ITEM_ASYNC_EVENT = 3
 } raw_epoll_item_kind;
 
 typedef struct {
@@ -53,6 +82,15 @@ typedef struct {
     raw_epoll_item_kind kind;
     raw_http_conn conn;
 } raw_epoll_connection_item;
+
+typedef struct {
+    raw_epoll_item_kind kind;
+    raw_http_async_runtime *runtime;
+} raw_epoll_async_item;
+
+static const http_response *search_response_for_query(const raw_http_app *app,
+                                                      const int16_t query[FASTVECTOR_DIMENSIONS],
+                                                      RinhaMetrics *metrics);
 
 static RinhaMetrics *app_metrics(const raw_http_app *app) {
 #if RINHA_ENABLE_METRICS
@@ -227,6 +265,21 @@ bool raw_http_search_mode_from_string(const char *value,
     return true;
 }
 
+bool raw_http_process_mode_from_string(const char *value, raw_http_process_mode *mode) {
+    if (mode == NULL) {
+        return false;
+    }
+    if (value == NULL || value[0] == '\0' || strcmp(value, "sync") == 0) {
+        *mode = RAW_HTTP_PROCESS_SYNC;
+        return true;
+    }
+    if (strcmp(value, "async_worker") == 0) {
+        *mode = RAW_HTTP_PROCESS_ASYNC_WORKER;
+        return true;
+    }
+    return false;
+}
+
 ssize_t raw_http_index_header_end(const char *buffer, size_t len) {
     if (len < 4) {
         return -1;
@@ -359,6 +412,39 @@ static int parse_request_header(const char *header, size_t len, parsed_request *
     return 0;
 }
 
+static const http_response *search_response_for_query(const raw_http_app *app,
+                                                      const int16_t query[FASTVECTOR_DIMENSIONS],
+                                                      RinhaMetrics *metrics) {
+    uint64_t start = metrics != NULL ? metrics_now_ns() : 0u;
+    uint8_t fraud_count;
+    if (app->search_mode == RAW_HTTP_SEARCH_KDPRIMARY) {
+        fraud_count = kdprimary_search_fraud_count(app->kdprimary, query);
+    } else if (app->search_mode == RAW_HTTP_SEARCH_KDPRIMARY2) {
+        KdPrimary2SearchResult result = kdprimary2_search_top5(app->kdprimary2, query);
+        fraud_count = result.fraud_count;
+        if (metrics != NULL) {
+            metrics_note_kdprimary2_search(metrics, &result, metrics_now_ns() - start);
+        }
+    } else if (app->kdtree_repair_enabled && app->kdtree != NULL) {
+        Ivf8SearchTraceResult trace = ivf8_search_trace(app->index, query, &app->search_config);
+        fraud_count = trace.result.fraud_count;
+        if (kdtree_repair_should_run(app->kdtree_repair_policy, &trace)) {
+            if (metrics != NULL) {
+                metrics_inc(&metrics->kdtree_repair_count);
+            }
+            fraud_count = kdtree_search_fraud_count(app->kdtree, query, NULL);
+        } else if (metrics != NULL) {
+            metrics_inc(&metrics->kdtree_repair_skipped);
+        }
+    } else {
+        fraud_count = ivf8_search_fraud_count(app->index, query, &app->search_config);
+    }
+    if (metrics != NULL) {
+        metrics_observe(&metrics->search, metrics_now_ns() - start);
+    }
+    return response_for_fraud_count(fraud_count);
+}
+
 static const http_response *route_request(const parsed_request *request, const char *body, const raw_http_app *app) {
     RinhaMetrics *metrics = app_metrics(app);
     if (request->path == RAW_HTTP_PATH_READY) {
@@ -395,36 +481,208 @@ static const http_response *route_request(const parsed_request *request, const c
         if (metrics != NULL) {
             metrics_observe(&metrics->vectorize, metrics_now_ns() - start);
         }
-        start = metrics != NULL ? metrics_now_ns() : 0u;
-        uint8_t fraud_count;
-        if (app->search_mode == RAW_HTTP_SEARCH_KDPRIMARY) {
-            fraud_count = kdprimary_search_fraud_count(app->kdprimary, query);
-        } else if (app->search_mode == RAW_HTTP_SEARCH_KDPRIMARY2) {
-            KdPrimary2SearchResult result = kdprimary2_search_top5(app->kdprimary2, query);
-            fraud_count = result.fraud_count;
-            if (metrics != NULL) {
-                metrics_note_kdprimary2_search(metrics, &result, metrics_now_ns() - start);
-            }
-        } else if (app->kdtree_repair_enabled && app->kdtree != NULL) {
-            Ivf8SearchTraceResult trace = ivf8_search_trace(app->index, query, &app->search_config);
-            fraud_count = trace.result.fraud_count;
-            if (kdtree_repair_should_run(app->kdtree_repair_policy, &trace)) {
-                if (metrics != NULL) {
-                    metrics_inc(&metrics->kdtree_repair_count);
-                }
-                fraud_count = kdtree_search_fraud_count(app->kdtree, query, NULL);
-            } else if (metrics != NULL) {
-                metrics_inc(&metrics->kdtree_repair_skipped);
-            }
-        } else {
-            fraud_count = ivf8_search_fraud_count(app->index, query, &app->search_config);
-        }
-        if (metrics != NULL) {
-            metrics_observe(&metrics->search, metrics_now_ns() - start);
-        }
-        return response_for_fraud_count(fraud_count);
+        return search_response_for_query(app, query, metrics);
     }
     return &RESPONSE_NOT_FOUND;
+}
+
+static void async_notify_event(int event_fd) {
+    uint64_t value = 1;
+    ssize_t ignored = write(event_fd, &value, sizeof(value));
+    (void)ignored;
+}
+
+static void *raw_http_async_worker_main(void *arg) {
+    raw_http_async_runtime *runtime = (raw_http_async_runtime *)arg;
+    for (;;) {
+        raw_http_async_job job;
+        memset(&job, 0, sizeof(job));
+
+        pthread_mutex_lock(&runtime->mutex);
+        while (runtime->job_count == 0 && !runtime->shutting_down) {
+            pthread_cond_wait(&runtime->not_empty, &runtime->mutex);
+        }
+        if (runtime->job_count == 0 && runtime->shutting_down) {
+            pthread_mutex_unlock(&runtime->mutex);
+            return NULL;
+        }
+        job = runtime->jobs[runtime->job_head];
+        runtime->job_head = (runtime->job_head + 1u) % runtime->queue_capacity;
+        runtime->job_count--;
+        pthread_mutex_unlock(&runtime->mutex);
+
+        RinhaMetrics *metrics = app_metrics(job.app);
+        uint64_t compute_start = metrics != NULL ? metrics_now_ns() : 0u;
+        if (metrics != NULL && job.enqueue_ns != 0 && compute_start >= job.enqueue_ns) {
+            metrics_observe(&metrics->async_job_wait, compute_start - job.enqueue_ns);
+        }
+        const http_response *response = search_response_for_query(job.app, job.query, metrics);
+        uint64_t completed_ns = metrics != NULL ? metrics_now_ns() : 0u;
+        if (metrics != NULL) {
+            metrics_inc(&metrics->async_jobs_completed);
+            metrics_observe(&metrics->async_job_compute, completed_ns - compute_start);
+        }
+
+        raw_http_async_completion completion = {
+            .conn = job.conn,
+            .generation = job.generation,
+            .response_data = response->data,
+            .response_len = response->len,
+            .completed_ns = completed_ns,
+        };
+
+        pthread_mutex_lock(&runtime->mutex);
+        if (runtime->completion_count < runtime->completion_capacity) {
+            runtime->completions[runtime->completion_tail] = completion;
+            runtime->completion_tail = (runtime->completion_tail + 1u) % runtime->completion_capacity;
+            runtime->completion_count++;
+            pthread_mutex_unlock(&runtime->mutex);
+            async_notify_event(runtime->event_fd);
+        } else {
+            pthread_mutex_unlock(&runtime->mutex);
+        }
+    }
+}
+
+int raw_http_async_runtime_create(raw_http_async_runtime **out, uint32_t workers, uint32_t queue_size) {
+    if (out == NULL) {
+        return -1;
+    }
+    *out = NULL;
+    if (workers == 0) {
+        workers = 1;
+    }
+    if (queue_size == 0) {
+        queue_size = RINHA_DEFAULT_FD_QUEUE_SIZE;
+    }
+
+    raw_http_async_runtime *runtime = (raw_http_async_runtime *)calloc(1, sizeof(*runtime));
+    if (runtime == NULL) {
+        return -1;
+    }
+    runtime->worker_count = workers;
+    runtime->queue_capacity = queue_size;
+    runtime->completion_capacity = queue_size + workers + 1u;
+    runtime->event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (runtime->event_fd < 0) {
+        free(runtime);
+        return -1;
+    }
+    if (pthread_mutex_init(&runtime->mutex, NULL) != 0 ||
+        pthread_cond_init(&runtime->not_empty, NULL) != 0) {
+        close(runtime->event_fd);
+        free(runtime);
+        return -1;
+    }
+    runtime->jobs = (raw_http_async_job *)calloc(runtime->queue_capacity, sizeof(runtime->jobs[0]));
+    runtime->completions = (raw_http_async_completion *)calloc(runtime->completion_capacity,
+                                                               sizeof(runtime->completions[0]));
+    runtime->threads = (pthread_t *)calloc(runtime->worker_count, sizeof(runtime->threads[0]));
+    if (runtime->jobs == NULL || runtime->completions == NULL || runtime->threads == NULL) {
+        raw_http_async_runtime_destroy(runtime);
+        return -1;
+    }
+
+    for (uint32_t i = 0; i < runtime->worker_count; i++) {
+        if (pthread_create(&runtime->threads[i], NULL, raw_http_async_worker_main, runtime) != 0) {
+            raw_http_async_runtime_destroy(runtime);
+            return -1;
+        }
+    }
+    *out = runtime;
+    return 0;
+}
+
+void raw_http_async_runtime_destroy(raw_http_async_runtime *runtime) {
+    if (runtime == NULL) {
+        return;
+    }
+    pthread_mutex_lock(&runtime->mutex);
+    runtime->shutting_down = true;
+    pthread_cond_broadcast(&runtime->not_empty);
+    pthread_mutex_unlock(&runtime->mutex);
+    if (runtime->threads != NULL) {
+        for (uint32_t i = 0; i < runtime->worker_count; i++) {
+            if (runtime->threads[i] != 0) {
+                (void)pthread_join(runtime->threads[i], NULL);
+            }
+        }
+    }
+    if (runtime->event_fd >= 0) {
+        close(runtime->event_fd);
+    }
+    pthread_cond_destroy(&runtime->not_empty);
+    pthread_mutex_destroy(&runtime->mutex);
+    free(runtime->threads);
+    free(runtime->completions);
+    free(runtime->jobs);
+    free(runtime);
+}
+
+int raw_http_async_runtime_event_fd(const raw_http_async_runtime *runtime) {
+    return runtime == NULL ? -1 : runtime->event_fd;
+}
+
+void raw_http_async_runtime_drain_event(raw_http_async_runtime *runtime) {
+    if (runtime == NULL || runtime->event_fd < 0) {
+        return;
+    }
+    for (;;) {
+        uint64_t value;
+        ssize_t n = read(runtime->event_fd, &value, sizeof(value));
+        if (n == (ssize_t)sizeof(value)) {
+            continue;
+        }
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        break;
+    }
+}
+
+bool raw_http_async_runtime_pop_completion(raw_http_async_runtime *runtime,
+                                           raw_http_async_completion *completion) {
+    if (runtime == NULL || completion == NULL) {
+        return false;
+    }
+    pthread_mutex_lock(&runtime->mutex);
+    if (runtime->completion_count == 0) {
+        pthread_mutex_unlock(&runtime->mutex);
+        return false;
+    }
+    *completion = runtime->completions[runtime->completion_head];
+    runtime->completion_head = (runtime->completion_head + 1u) % runtime->completion_capacity;
+    runtime->completion_count--;
+    pthread_mutex_unlock(&runtime->mutex);
+    return true;
+}
+
+static bool raw_http_async_runtime_submit(raw_http_async_runtime *runtime,
+                                          raw_http_conn *conn,
+                                          const raw_http_app *app,
+                                          const int16_t query[FASTVECTOR_DIMENSIONS]) {
+    if (runtime == NULL || conn == NULL || app == NULL) {
+        return false;
+    }
+    raw_http_async_job job = {
+        .conn = conn,
+        .generation = conn->async_generation,
+        .app = app,
+        .enqueue_ns = app_metrics(app) != NULL ? metrics_now_ns() : 0u,
+    };
+    memcpy(job.query, query, sizeof(job.query));
+
+    pthread_mutex_lock(&runtime->mutex);
+    if (runtime->job_count >= runtime->queue_capacity || runtime->shutting_down) {
+        pthread_mutex_unlock(&runtime->mutex);
+        return false;
+    }
+    runtime->jobs[runtime->job_tail] = job;
+    runtime->job_tail = (runtime->job_tail + 1u) % runtime->queue_capacity;
+    runtime->job_count++;
+    pthread_cond_signal(&runtime->not_empty);
+    pthread_mutex_unlock(&runtime->mutex);
+    return true;
 }
 
 static int write_all(int fd, const char *data, size_t len, RinhaMetrics *metrics) {
@@ -507,6 +765,77 @@ static void prepare_response(const parsed_request *request,
     const http_response *response = route_request(request, body, app);
     *out_data = response->data;
     *out_len = response->len;
+}
+
+static bool raw_http_conn_try_async_fraud(raw_http_conn *conn,
+                                          const parsed_request *request,
+                                          const char *body,
+                                          const char **out_data,
+                                          size_t *out_len) {
+    const raw_http_app *app = conn == NULL ? NULL : conn->app;
+    if (app == NULL ||
+        app->process_mode != RAW_HTTP_PROCESS_ASYNC_WORKER ||
+        app->async_runtime == NULL ||
+        app->search_mode != RAW_HTTP_SEARCH_KDPRIMARY2 ||
+        request->path != RAW_HTTP_PATH_FRAUD_SCORE) {
+        return false;
+    }
+
+    RinhaMetrics *metrics = app_metrics(app);
+    if (metrics != NULL) {
+        metrics_inc(&metrics->fraud_count);
+    }
+    if (request->method != RAW_HTTP_METHOD_POST) {
+        *out_data = RESPONSE_METHOD_NOT_ALLOWED.data;
+        *out_len = RESPONSE_METHOD_NOT_ALLOWED.len;
+        return true;
+    }
+    if (!request->content_length_present) {
+        *out_data = RESPONSE_BAD_REQUEST.data;
+        *out_len = RESPONSE_BAD_REQUEST.len;
+        return true;
+    }
+    if (body == NULL || app->kdprimary2 == NULL) {
+        *out_data = RESPONSE_FRAUD_APPROVED.data;
+        *out_len = RESPONSE_FRAUD_APPROVED.len;
+        return true;
+    }
+
+    int16_t query[FASTVECTOR_DIMENSIONS];
+    uint64_t start = metrics != NULL ? metrics_now_ns() : 0u;
+    if (!fastvector_vectorize(body, request->content_length, query)) {
+        if (metrics != NULL) {
+            metrics_observe(&metrics->vectorize, metrics_now_ns() - start);
+            metrics_inc(&metrics->vectorize_failures);
+        }
+        *out_data = RESPONSE_FRAUD_APPROVED.data;
+        *out_len = RESPONSE_FRAUD_APPROVED.len;
+        return true;
+    }
+    if (metrics != NULL) {
+        metrics_observe(&metrics->vectorize, metrics_now_ns() - start);
+    }
+
+    conn->async_pending = true;
+    conn->async_generation++;
+    if (raw_http_async_runtime_submit(app->async_runtime, conn, app, query)) {
+        if (metrics != NULL) {
+            metrics_inc(&metrics->async_jobs_enqueued);
+        }
+        *out_data = NULL;
+        *out_len = 0;
+        return true;
+    }
+
+    conn->async_pending = false;
+    if (metrics != NULL) {
+        metrics_inc(&metrics->async_job_queue_full);
+        metrics_inc(&metrics->async_sync_fallback);
+    }
+    const http_response *response = search_response_for_query(app, query, metrics);
+    *out_data = response->data;
+    *out_len = response->len;
+    return true;
 }
 
 static bool compact_or_expand_buffer(char *buffer, size_t *used, size_t *pos, size_t *capacity, size_t needed) {
@@ -743,6 +1072,10 @@ bool raw_http_conn_wants_write(const raw_http_conn *conn) {
     return conn != NULL && !conn->closed && conn->out_data != NULL && conn->out_pos < conn->out_len;
 }
 
+bool raw_http_conn_has_pending_async(const raw_http_conn *conn) {
+    return conn != NULL && !conn->closed && conn->async_pending;
+}
+
 void raw_http_conn_close(raw_http_conn *conn) {
     if (conn == NULL || conn->closed) {
         return;
@@ -758,6 +1091,25 @@ void raw_http_conn_close(raw_http_conn *conn) {
         metrics_note_closed_connection(metrics);
         metrics_observe(&metrics->connection_lifetime, metrics_now_ns() - conn->connection_start_ns);
     }
+}
+
+bool raw_http_conn_complete_async(raw_http_conn *conn, const raw_http_async_completion *completion) {
+    if (conn == NULL || completion == NULL ||
+        !conn->async_pending ||
+        conn->async_generation != completion->generation) {
+        return false;
+    }
+    conn->async_pending = false;
+    conn->async_completed_ns = completion->completed_ns;
+    if (conn->closed || conn->fd < 0) {
+        return false;
+    }
+    conn->out_data = completion->response_data;
+    conn->out_len = completion->response_len;
+    conn->out_pos = 0;
+    conn->close_after_write = false;
+    conn->write_start_ns = app_metrics(conn->app) != NULL ? metrics_now_ns() : 0u;
+    return true;
 }
 
 static void raw_http_conn_set_static_response(raw_http_conn *conn,
@@ -809,11 +1161,15 @@ static uint32_t raw_http_conn_flush(raw_http_conn *conn) {
             if (conn->request_complete_ns != 0 && now >= conn->request_complete_ns) {
                 metrics_observe(&metrics->request_complete_to_response_done, now - conn->request_complete_ns);
             }
+            if (conn->async_completed_ns != 0 && now >= conn->async_completed_ns) {
+                metrics_observe(&metrics->async_completion_to_write, now - conn->async_completed_ns);
+            }
         }
         conn->out_data = NULL;
         conn->out_len = 0;
         conn->out_pos = 0;
         conn->write_start_ns = 0;
+        conn->async_completed_ns = 0;
         conn->request_start_ns = 0;
         conn->request_read_start_ns = 0;
         conn->request_header_complete_ns = 0;
@@ -836,6 +1192,9 @@ static uint32_t raw_http_conn_process_buffer(raw_http_conn *conn) {
         }
         if (raw_http_conn_wants_write(conn)) {
             return RAW_HTTP_CONN_WANT_WRITE;
+        }
+        if (raw_http_conn_has_pending_async(conn)) {
+            return RAW_HTTP_CONN_WANT_READ;
         }
         if (conn->pos == conn->used) {
             conn->pos = 0;
@@ -923,19 +1282,33 @@ static uint32_t raw_http_conn_process_buffer(raw_http_conn *conn) {
 
         const char *response_data = NULL;
         size_t response_len = 0;
-        prepare_response(&request,
-                         conn->buffer + header_end,
-                         conn->app,
-                         conn->dynamic_response,
-                         sizeof(conn->dynamic_response),
-                         &response_data,
-                         &response_len);
+        bool async_handled = raw_http_conn_try_async_fraud(conn,
+                                                           &request,
+                                                           conn->buffer + header_end,
+                                                           &response_data,
+                                                           &response_len);
+        if (!async_handled) {
+            prepare_response(&request,
+                             conn->buffer + header_end,
+                             conn->app,
+                             conn->dynamic_response,
+                             sizeof(conn->dynamic_response),
+                             &response_data,
+                             &response_len);
+        }
+        conn->pos = body_end;
+        if (response_data == NULL && raw_http_conn_has_pending_async(conn)) {
+            if (conn->pos == conn->used) {
+                conn->pos = 0;
+                conn->used = 0;
+            }
+            return RAW_HTTP_CONN_WANT_READ;
+        }
         conn->out_data = response_data;
         conn->out_len = response_len;
         conn->out_pos = 0;
         conn->close_after_write = false;
         conn->write_start_ns = metrics != NULL ? metrics_now_ns() : 0u;
-        conn->pos = body_end;
         if (conn->pos == conn->used) {
             conn->pos = 0;
             conn->used = 0;
@@ -953,6 +1326,9 @@ uint32_t raw_http_conn_on_writable(raw_http_conn *conn) {
     if (status != RAW_HTTP_CONN_WANT_READ) {
         return status;
     }
+    if (raw_http_conn_has_pending_async(conn)) {
+        return RAW_HTTP_CONN_WANT_READ;
+    }
     return raw_http_conn_process_buffer(conn);
 }
 
@@ -960,6 +1336,9 @@ uint32_t raw_http_conn_on_readable(raw_http_conn *conn) {
     RinhaMetrics *metrics = app_metrics(conn->app);
     if (raw_http_conn_wants_write(conn)) {
         return RAW_HTTP_CONN_WANT_WRITE;
+    }
+    if (raw_http_conn_has_pending_async(conn)) {
+        return RAW_HTTP_CONN_WANT_READ;
     }
 
     for (;;) {
@@ -1144,13 +1523,19 @@ static void raw_epoll_close_conn(int epoll_fd, raw_epoll_connection_item *item) 
     }
     raw_http_conn_close(conn);
     raw_epoll_note_close(metrics);
+    if (conn->async_pending) {
+        return;
+    }
     free(item);
 }
 
 static int raw_epoll_update_interest(int epoll_fd, raw_http_conn *conn) {
     struct epoll_event event;
     memset(&event, 0, sizeof(event));
-    event.events = EPOLLIN | EPOLLRDHUP | EPOLLERR | EPOLLHUP;
+    event.events = EPOLLRDHUP | EPOLLERR | EPOLLHUP;
+    if (!raw_http_conn_has_pending_async(conn)) {
+        event.events |= EPOLLIN;
+    }
     if (raw_http_conn_wants_write(conn)) {
         event.events |= EPOLLOUT;
     }
@@ -1184,6 +1569,33 @@ static int raw_epoll_add_connection(int epoll_fd, int client_fd, const raw_http_
     }
     raw_epoll_note_open(app_metrics(app));
     return 0;
+}
+
+static void raw_epoll_process_async_completions(int epoll_fd, raw_http_async_runtime *runtime) {
+    raw_http_async_runtime_drain_event(runtime);
+    raw_http_async_completion completion;
+    while (raw_http_async_runtime_pop_completion(runtime, &completion)) {
+        raw_http_conn *conn = completion.conn;
+        if (conn == NULL) {
+            continue;
+        }
+        raw_epoll_connection_item *item =
+            (raw_epoll_connection_item *)((char *)conn - offsetof(raw_epoll_connection_item, conn));
+        if (!raw_http_conn_complete_async(conn, &completion)) {
+            if (conn->closed) {
+                free(item);
+            }
+            continue;
+        }
+        uint32_t status = raw_http_conn_on_writable(conn);
+        if (status == RAW_HTTP_CONN_CLOSED || conn->closed) {
+            raw_epoll_close_conn(epoll_fd, item);
+            continue;
+        }
+        if (raw_epoll_update_interest(epoll_fd, conn) != 0) {
+            raw_epoll_close_conn(epoll_fd, item);
+        }
+    }
 }
 
 static void raw_epoll_accept_ready(int epoll_fd, int server_fd, const raw_http_app *app) {
@@ -1232,6 +1644,10 @@ int raw_http_serve_epoll(const char *addr, const raw_http_app *app) {
         .kind = RAW_EPOLL_ITEM_LISTENER,
         .fd = server_fd,
     };
+    raw_epoll_async_item async_item = {
+        .kind = RAW_EPOLL_ITEM_ASYNC_EVENT,
+        .runtime = app == NULL ? NULL : app->async_runtime,
+    };
     struct epoll_event event;
     memset(&event, 0, sizeof(event));
     event.events = EPOLLIN | EPOLLERR | EPOLLHUP;
@@ -1240,6 +1656,19 @@ int raw_http_serve_epoll(const char *addr, const raw_http_app *app) {
         close(epoll_fd);
         close(server_fd);
         return -1;
+    }
+    if (async_item.runtime != NULL) {
+        int async_fd = raw_http_async_runtime_event_fd(async_item.runtime);
+        if (async_fd >= 0) {
+            memset(&event, 0, sizeof(event));
+            event.events = EPOLLIN | EPOLLERR | EPOLLHUP;
+            event.data.ptr = &async_item;
+            if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, async_fd, &event) != 0) {
+                close(epoll_fd);
+                close(server_fd);
+                return -1;
+            }
+        }
     }
 
     struct epoll_event events[128];
@@ -1266,6 +1695,11 @@ int raw_http_serve_epoll(const char *addr, const raw_http_app *app) {
                     return -1;
                 }
                 raw_epoll_accept_ready(epoll_fd, server_fd, app);
+                continue;
+            }
+            if (item->kind == RAW_EPOLL_ITEM_ASYNC_EVENT) {
+                raw_epoll_async_item *async = (raw_epoll_async_item *)item;
+                raw_epoll_process_async_completions(epoll_fd, async->runtime);
                 continue;
             }
 

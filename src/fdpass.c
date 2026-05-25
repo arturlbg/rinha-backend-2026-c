@@ -297,14 +297,21 @@ static void close_epoll_conn(fdpass_runtime *runtime, raw_http_conn *conn) {
     int feedback_fd = conn->close_feedback_fd;
     raw_http_conn_close(conn);
     send_close_feedback(feedback_fd);
+    conn->close_feedback_fd = -1;
     epoll_note_close(runtime_metrics(runtime));
+    if (conn->async_pending) {
+        return;
+    }
     free(conn);
 }
 
 static int update_epoll_interest(fdpass_runtime *runtime, raw_http_conn *conn) {
     struct epoll_event event;
     memset(&event, 0, sizeof(event));
-    event.events = EPOLLIN | EPOLLRDHUP | EPOLLERR | EPOLLHUP;
+    event.events = EPOLLRDHUP | EPOLLERR | EPOLLHUP;
+    if (!raw_http_conn_has_pending_async(conn)) {
+        event.events |= EPOLLIN;
+    }
     if (raw_http_conn_wants_write(conn)) {
         event.events |= EPOLLOUT;
     }
@@ -312,9 +319,36 @@ static int update_epoll_interest(fdpass_runtime *runtime, raw_http_conn *conn) {
     return epoll_ctl(runtime->epoll_fd, EPOLL_CTL_MOD, conn->fd, &event);
 }
 
+static void process_async_completions(fdpass_runtime *runtime) {
+    raw_http_async_runtime *async = runtime->app == NULL ? NULL : runtime->app->async_runtime;
+    raw_http_async_runtime_drain_event(async);
+    raw_http_async_completion completion;
+    while (raw_http_async_runtime_pop_completion(async, &completion)) {
+        raw_http_conn *conn = completion.conn;
+        if (conn == NULL) {
+            continue;
+        }
+        if (!raw_http_conn_complete_async(conn, &completion)) {
+            if (conn->closed) {
+                free(conn);
+            }
+            continue;
+        }
+        uint32_t status = raw_http_conn_on_writable(conn);
+        if (status == RAW_HTTP_CONN_CLOSED || conn->closed) {
+            close_epoll_conn(runtime, conn);
+            continue;
+        }
+        if (update_epoll_interest(runtime, conn) != 0) {
+            close_epoll_conn(runtime, conn);
+        }
+    }
+}
+
 static void *fdpass_epoll_thread(void *arg) {
     fdpass_runtime *runtime = (fdpass_runtime *)arg;
     RinhaMetrics *metrics = runtime_metrics(runtime);
+    raw_http_async_runtime *async = runtime->app == NULL ? NULL : runtime->app->async_runtime;
     struct epoll_event events[128];
 
     for (;;) {
@@ -327,6 +361,10 @@ static void *fdpass_epoll_thread(void *arg) {
         }
 
         for (int i = 0; i < n; i++) {
+            if (async != NULL && events[i].data.ptr == async) {
+                process_async_completions(runtime);
+                continue;
+            }
             raw_http_conn *conn = (raw_http_conn *)events[i].data.ptr;
             if (conn == NULL || conn->closed) {
                 continue;
@@ -375,6 +413,23 @@ static int start_epoll_thread(fdpass_runtime *runtime) {
         return -1;
     }
     runtime->epoll_ready = true;
+
+    raw_http_async_runtime *async = runtime->app == NULL ? NULL : runtime->app->async_runtime;
+    if (async != NULL) {
+        int async_fd = raw_http_async_runtime_event_fd(async);
+        if (async_fd >= 0) {
+            struct epoll_event event;
+            memset(&event, 0, sizeof(event));
+            event.events = EPOLLIN | EPOLLERR | EPOLLHUP;
+            event.data.ptr = async;
+            if (epoll_ctl(runtime->epoll_fd, EPOLL_CTL_ADD, async_fd, &event) != 0) {
+                close(runtime->epoll_fd);
+                runtime->epoll_fd = -1;
+                runtime->epoll_ready = false;
+                return -1;
+            }
+        }
+    }
 
     pthread_t thread;
     if (pthread_create(&thread, NULL, fdpass_epoll_thread, runtime) != 0) {

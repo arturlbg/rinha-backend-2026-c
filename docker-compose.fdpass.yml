@@ -46,6 +46,8 @@ services:
       RINHA_METRICS_ENABLED: "${RINHA_METRICS_ENABLED:-false}"
       RINHA_EXEC_MODE: "${RINHA_EXEC_MODE:-per_connection}"
       RINHA_WORKERS: "${RINHA_WORKERS:-1}"
+      RINHA_API_PROCESS_MODE: "${RINHA_API_PROCESS_MODE:-sync}"
+      RINHA_API_WORKERS: "${RINHA_API_WORKERS:-1}"
       RINHA_FD_QUEUE_SIZE: "${RINHA_FD_QUEUE_SIZE:-1024}"
     volumes:
       - sockets:/sockets
@@ -87,6 +89,8 @@ services:
       RINHA_METRICS_ENABLED: "${RINHA_METRICS_ENABLED:-false}"
       RINHA_EXEC_MODE: "${RINHA_EXEC_MODE:-per_connection}"
       RINHA_WORKERS: "${RINHA_WORKERS:-1}"
+      RINHA_API_PROCESS_MODE: "${RINHA_API_PROCESS_MODE:-sync}"
+      RINHA_API_WORKERS: "${RINHA_API_WORKERS:-1}"
       RINHA_FD_QUEUE_SIZE: "${RINHA_FD_QUEUE_SIZE:-1024}"
     volumes:
       - sockets:/sockets

@@ -39,6 +39,14 @@ typedef enum {
     RAW_HTTP_SEARCH_KDPRIMARY2 = 2
 } raw_http_search_mode;
 
+typedef enum {
+    RAW_HTTP_PROCESS_SYNC = 0,
+    RAW_HTTP_PROCESS_ASYNC_WORKER = 1
+} raw_http_process_mode;
+
+typedef struct raw_http_async_runtime raw_http_async_runtime;
+typedef struct raw_http_conn raw_http_conn;
+
 typedef struct {
     raw_http_method method;
     raw_http_path path;
@@ -56,11 +64,13 @@ typedef struct {
     RinhaMetrics *metrics;
     const char *listen_mode;
     const char *exec_mode;
+    raw_http_process_mode process_mode;
+    raw_http_async_runtime *async_runtime;
     uint32_t workers;
     uint32_t queue_size;
 } raw_http_app;
 
-typedef struct {
+struct raw_http_conn {
     int fd;
     int close_feedback_fd;
     const raw_http_app *app;
@@ -82,7 +92,18 @@ typedef struct {
     uint64_t request_start_ns;
     uint64_t write_start_ns;
     uint32_t requests_seen;
-} raw_http_conn;
+    bool async_pending;
+    uint64_t async_generation;
+    uint64_t async_completed_ns;
+};
+
+typedef struct {
+    raw_http_conn *conn;
+    uint64_t generation;
+    const char *response_data;
+    size_t response_len;
+    uint64_t completed_ns;
+} raw_http_async_completion;
 
 int raw_http_serve(const char *addr, const raw_http_app *app);
 int raw_http_serve_epoll(const char *addr, const raw_http_app *app);
@@ -93,6 +114,16 @@ uint32_t raw_http_conn_on_readable(raw_http_conn *conn);
 uint32_t raw_http_conn_on_writable(raw_http_conn *conn);
 bool raw_http_conn_wants_write(const raw_http_conn *conn);
 void raw_http_conn_close(raw_http_conn *conn);
+bool raw_http_conn_has_pending_async(const raw_http_conn *conn);
+bool raw_http_conn_complete_async(raw_http_conn *conn, const raw_http_async_completion *completion);
+
+bool raw_http_process_mode_from_string(const char *value, raw_http_process_mode *mode);
+int raw_http_async_runtime_create(raw_http_async_runtime **out, uint32_t workers, uint32_t queue_size);
+void raw_http_async_runtime_destroy(raw_http_async_runtime *runtime);
+int raw_http_async_runtime_event_fd(const raw_http_async_runtime *runtime);
+void raw_http_async_runtime_drain_event(raw_http_async_runtime *runtime);
+bool raw_http_async_runtime_pop_completion(raw_http_async_runtime *runtime,
+                                           raw_http_async_completion *completion);
 
 bool raw_http_search_mode_from_string(const char *value,
                                       raw_http_search_mode *mode,

@@ -63,6 +63,11 @@ typedef struct {
     atomic_uint_fast64_t requests_per_connection_2_5;
     atomic_uint_fast64_t requests_per_connection_6_20;
     atomic_uint_fast64_t requests_per_connection_gt20;
+    atomic_uint_fast64_t async_jobs_enqueued;
+    atomic_uint_fast64_t async_jobs_completed;
+    atomic_uint_fast64_t async_job_queue_full;
+    atomic_uint_fast64_t async_sync_fallback;
+    atomic_uint_fast64_t async_worker_count;
 
     RinhaMetricHistogram request_total;
     RinhaMetricHistogram accepted_to_first_epollin;
@@ -79,6 +84,9 @@ typedef struct {
     RinhaMetricHistogram connection_lifetime;
     RinhaMetricHistogram fdpass_receive;
     RinhaMetricHistogram queue_wait;
+    RinhaMetricHistogram async_job_wait;
+    RinhaMetricHistogram async_job_compute;
+    RinhaMetricHistogram async_completion_to_write;
     RinhaValueHistogram kdprimary2_nodes_visited;
     RinhaValueHistogram kdprimary2_leaves_visited;
     RinhaValueHistogram kdprimary2_points_evaluated;

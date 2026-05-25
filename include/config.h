@@ -5,6 +5,7 @@
 #define RINHA_DEFAULT_LISTEN_MODE "tcp"
 #define RINHA_DEFAULT_UNIX_SOCKET "/sockets/api.ctrl"
 #define RINHA_DEFAULT_EXEC_MODE "per_connection"
+#define RINHA_DEFAULT_API_PROCESS_MODE "sync"
 #define RINHA_DEFAULT_WORKERS 1u
 #define RINHA_DEFAULT_FD_QUEUE_SIZE 1024u
 #define RINHA_DEFAULT_INDEX_PATH "/app/resources/index.bin"

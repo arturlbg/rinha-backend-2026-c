@@ -158,6 +158,16 @@ int main(void) {
     fdpass_exec_mode exec_mode = parse_exec_mode(exec_mode_text);
     uint32_t workers = env_u32("RINHA_WORKERS", RINHA_DEFAULT_WORKERS);
     uint32_t queue_size = env_u32("RINHA_FD_QUEUE_SIZE", RINHA_DEFAULT_FD_QUEUE_SIZE);
+    const char *process_mode_text = getenv("RINHA_API_PROCESS_MODE");
+    if (process_mode_text == NULL || process_mode_text[0] == '\0') {
+        process_mode_text = RINHA_DEFAULT_API_PROCESS_MODE;
+    }
+    raw_http_process_mode process_mode;
+    if (!raw_http_process_mode_from_string(process_mode_text, &process_mode)) {
+        fprintf(stderr, "invalid RINHA_API_PROCESS_MODE=%s\n", process_mode_text);
+        return 1;
+    }
+    uint32_t api_workers = env_u32("RINHA_API_WORKERS", RINHA_DEFAULT_WORKERS);
 
 #if RINHA_ENABLE_METRICS
     RinhaMetrics metrics;
@@ -304,6 +314,27 @@ int main(void) {
     uint32_t warmup_queries = env_u32("RINHA_INDEX_WARMUP_QUERIES", RINHA_DEFAULT_INDEX_WARMUP_QUERIES);
     bool use_madvise = metrics_parse_enabled(getenv("RINHA_INDEX_MADVISE"));
 
+    raw_http_async_runtime *async_runtime = NULL;
+    if (process_mode == RAW_HTTP_PROCESS_ASYNC_WORKER) {
+        if (raw_http_async_runtime_create(&async_runtime, api_workers, queue_size) != 0) {
+            fprintf(stderr, "failed to start async request workers\n");
+            kdtree_free(&kdtree);
+            kdprimary2_close(&kdprimary2);
+            kdprimary_close(&kdprimary);
+            ivf8_index_close(&index);
+            return 1;
+        }
+#if RINHA_ENABLE_METRICS
+        metrics_add(&metrics.async_worker_count, api_workers);
+#endif
+        fprintf(stderr,
+                "api_process mode=async_worker workers=%u queue_size=%u\n",
+                api_workers,
+                queue_size);
+    } else {
+        fprintf(stderr, "api_process mode=sync\n");
+    }
+
     raw_http_app app = {
         .index = search_mode == RAW_HTTP_SEARCH_IVF8 ? &index : NULL,
         .kdprimary = search_mode == RAW_HTTP_SEARCH_KDPRIMARY ? &kdprimary : NULL,
@@ -324,7 +355,9 @@ int main(void) {
 #endif
         .listen_mode = listen_mode,
         .exec_mode = exec_mode_text,
-        .workers = workers,
+        .process_mode = process_mode,
+        .async_runtime = async_runtime,
+        .workers = process_mode == RAW_HTTP_PROCESS_ASYNC_WORKER ? api_workers : workers,
         .queue_size = queue_size,
     };
 
@@ -349,6 +382,7 @@ int main(void) {
         serve_result = fdpass_serve(unix_socket, &app, &fdpass_opts);
     } else {
         fprintf(stderr, "invalid RINHA_LISTEN_MODE=%s\n", listen_mode);
+        raw_http_async_runtime_destroy(async_runtime);
         kdtree_free(&kdtree);
         kdprimary2_close(&kdprimary2);
         kdprimary_close(&kdprimary);
@@ -358,12 +392,14 @@ int main(void) {
 
     if (serve_result != 0) {
         perror("serve");
+        raw_http_async_runtime_destroy(async_runtime);
         kdtree_free(&kdtree);
         kdprimary2_close(&kdprimary2);
         kdprimary_close(&kdprimary);
         ivf8_index_close(&index);
         return 1;
     }
+    raw_http_async_runtime_destroy(async_runtime);
     kdtree_free(&kdtree);
     kdprimary2_close(&kdprimary2);
     kdprimary_close(&kdprimary);
