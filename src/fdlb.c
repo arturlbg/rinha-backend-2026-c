@@ -6,7 +6,6 @@
 #include <ctype.h>
 #include <errno.h>
 #include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -280,14 +279,6 @@ static int accept_client(int listen_fd) {
     }
 }
 
-static void tune_client_fd(int fd) {
-    int enabled = 1;
-    (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled));
-#ifdef TCP_QUICKACK
-    (void)setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &enabled, sizeof(enabled));
-#endif
-}
-
 static bool reconnect_upstream(FdlbUpstream *upstream, uint32_t retry_ms, uint32_t timeout_ms) {
     if (upstream->fd >= 0) {
         close(upstream->fd);
@@ -389,7 +380,6 @@ int fdlb_run(const FdlbConfig *config) {
             continue;
         }
 
-        tune_client_fd(client_fd);
         if (!deliver_fd(upstreams, upstream_count, &cursor, client_fd,
                         config->connect_retry_ms == 0U ? 25U : config->connect_retry_ms)) {
             close(client_fd);
