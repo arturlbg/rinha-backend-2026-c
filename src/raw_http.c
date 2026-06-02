@@ -412,6 +412,71 @@ static int parse_request_header(const char *header, size_t len, parsed_request *
     return 0;
 }
 
+static int parse_fast_fraud_header(const char *header, size_t len, parsed_request *out) {
+    static const char request_prefix[] = "POST /fraud-score ";
+    static const char content_length[] = "\r\nContent-Length:";
+    static const char content_length_lower[] = "\r\ncontent-length:";
+
+    if (header == NULL || out == NULL ||
+        len < sizeof(request_prefix) - 1u ||
+        memcmp(header, request_prefix, sizeof(request_prefix) - 1u) != 0) {
+        return -1;
+    }
+
+    const char *line = memmem(header, len, content_length, sizeof(content_length) - 1u);
+    size_t marker_len = sizeof(content_length) - 1u;
+    if (line == NULL) {
+        line = memmem(header, len, content_length_lower, sizeof(content_length_lower) - 1u);
+        marker_len = sizeof(content_length_lower) - 1u;
+    }
+    if (line == NULL) {
+        return -1;
+    }
+
+    const char *p = line + marker_len;
+    const char *end = header + len;
+    while (p < end && (*p == ' ' || *p == '\t')) {
+        p++;
+    }
+    if (p == end || !isdigit((unsigned char)*p)) {
+        return -1;
+    }
+
+    size_t parsed = 0;
+    while (p < end && isdigit((unsigned char)*p)) {
+        size_t digit = (size_t)(*p - '0');
+        if (parsed > (SIZE_MAX - digit) / 10u) {
+            return -1;
+        }
+        parsed = parsed * 10u + digit;
+        p++;
+    }
+    while (p < end && (*p == ' ' || *p == '\t')) {
+        p++;
+    }
+    if (p + 1 >= end || p[0] != '\r' || p[1] != '\n' || parsed > RINHA_MAX_REQUEST_BYTES) {
+        return -1;
+    }
+
+    out->method = RAW_HTTP_METHOD_POST;
+    out->path = RAW_HTTP_PATH_FRAUD_SCORE;
+    out->content_length = parsed;
+    out->content_length_present = true;
+    return 0;
+}
+
+static int parse_request_header_for_app(const raw_http_app *app,
+                                        const char *header,
+                                        size_t len,
+                                        parsed_request *out) {
+    if (app != NULL &&
+        app->fast_fraud_parser &&
+        parse_fast_fraud_header(header, len, out) == 0) {
+        return 0;
+    }
+    return parse_request_header(header, len, out);
+}
+
 static const http_response *search_response_for_query(const raw_http_app *app,
                                                       const int16_t query[FASTVECTOR_DIMENSIONS],
                                                       RinhaMetrics *metrics) {
@@ -934,7 +999,7 @@ static int raw_http_handle_connection_loop(int client_fd, const raw_http_app *ap
         size_t header_start = pos;
         size_t header_end = pos + (size_t)relative_header_end;
         parsed_request request;
-        if (parse_request_header(buffer + header_start, header_end - header_start, &request) != 0) {
+        if (parse_request_header_for_app(app, buffer + header_start, header_end - header_start, &request) != 0) {
             if (metrics != NULL) {
                 metrics_inc(&metrics->malformed_requests);
             }
@@ -1232,7 +1297,7 @@ static uint32_t raw_http_conn_process_buffer(raw_http_conn *conn) {
         size_t header_end = conn->pos + (size_t)relative_header_end;
         uint64_t header_complete_ns = metrics != NULL ? metrics_now_ns() : 0u;
         parsed_request request;
-        if (parse_request_header(conn->buffer + header_start, header_end - header_start, &request) != 0) {
+        if (parse_request_header_for_app(conn->app, conn->buffer + header_start, header_end - header_start, &request) != 0) {
             if (metrics != NULL) {
                 metrics_inc(&metrics->malformed_requests);
                 metrics_inc(&metrics->epoll_parser_errors);
@@ -1402,6 +1467,32 @@ static void *connection_thread(void *arg) {
     return NULL;
 }
 
+static bool socket_env_bool(const char *name, bool fallback) {
+    const char *value = getenv(name);
+    if (value == NULL || value[0] == '\0') {
+        return fallback;
+    }
+    if (strcmp(value, "1") == 0 ||
+        strcmp(value, "true") == 0 ||
+        strcmp(value, "TRUE") == 0 ||
+        strcmp(value, "yes") == 0 ||
+        strcmp(value, "YES") == 0 ||
+        strcmp(value, "on") == 0 ||
+        strcmp(value, "ON") == 0) {
+        return true;
+    }
+    if (strcmp(value, "0") == 0 ||
+        strcmp(value, "false") == 0 ||
+        strcmp(value, "FALSE") == 0 ||
+        strcmp(value, "no") == 0 ||
+        strcmp(value, "NO") == 0 ||
+        strcmp(value, "off") == 0 ||
+        strcmp(value, "OFF") == 0) {
+        return false;
+    }
+    return fallback;
+}
+
 static void tune_tcp_fd(int fd, bool nonblocking) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags >= 0) {
@@ -1413,9 +1504,13 @@ static void tune_tcp_fd(int fd, bool nonblocking) {
     }
 
     int enabled = 1;
-    (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled));
+    if (socket_env_bool("RINHA_API_TCP_NODELAY", true)) {
+        (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled));
+    }
 #ifdef TCP_QUICKACK
-    (void)setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &enabled, sizeof(enabled));
+    if (socket_env_bool("RINHA_API_TCP_QUICKACK", true)) {
+        (void)setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &enabled, sizeof(enabled));
+    }
 #endif
 }
 

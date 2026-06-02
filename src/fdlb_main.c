@@ -46,7 +46,13 @@ int main(void) {
         .listen_addr = listen_addr,
         .upstreams = upstreams,
         .strategy = getenv("RINHA_FDLB_STRATEGY"),
+        .lean = env_bool("RINHA_FDLB_LEAN", false),
         .metrics_enabled = env_bool("RINHA_FDLB_METRICS", false),
+        .reuseport = env_bool("RINHA_FDLB_REUSEPORT", true),
+        .tcp_defer_accept = env_bool("RINHA_FDLB_TCP_DEFER_ACCEPT", false),
+        .tcp_fastopen = env_bool("RINHA_FDLB_TCP_FASTOPEN", false),
+        .so_busy_poll_us = env_u32("RINHA_FDLB_SO_BUSY_POLL_US", 0U),
+        .listen_backlog = env_u32("RINHA_FDLB_LISTEN_BACKLOG", 4096U),
         .connect_retry_ms = env_u32("RINHA_LB_CONNECT_RETRY_MS", 25U),
         .startup_timeout_ms = env_u32("RINHA_LB_STARTUP_TIMEOUT_MS", 10000U),
     };

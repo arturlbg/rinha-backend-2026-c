@@ -587,6 +587,7 @@ int main(void) {
         .exec_mode = exec_mode_text,
         .process_mode = process_mode,
         .async_runtime = NULL,
+        .fast_fraud_parser = env_bool("RINHA_FAST_FRAUD_PARSER", false),
         .workers = process_mode == RAW_HTTP_PROCESS_ASYNC_WORKER ? api_workers : workers,
         .queue_size = queue_size,
     };

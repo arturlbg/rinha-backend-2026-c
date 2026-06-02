@@ -9,7 +9,13 @@ typedef struct {
     const char *listen_addr;
     const char *upstreams;
     const char *strategy;
+    bool lean;
     bool metrics_enabled;
+    bool reuseport;
+    bool tcp_defer_accept;
+    bool tcp_fastopen;
+    uint32_t so_busy_poll_us;
+    uint32_t listen_backlog;
     uint32_t connect_retry_ms;
     uint32_t startup_timeout_ms;
 } FdlbConfig;

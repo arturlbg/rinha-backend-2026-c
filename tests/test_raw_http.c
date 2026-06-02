@@ -573,6 +573,7 @@ static void test_valid_body_uses_kdprimary2_response(void) {
         .kdprimary2 = &kdprimary2,
         .search_mode = RAW_HTTP_SEARCH_KDPRIMARY2,
         .metrics = &metrics,
+        .fast_fraud_parser = true,
     };
 
     char req[1024];

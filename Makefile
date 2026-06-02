@@ -100,11 +100,11 @@ fdlb: $(FDLB_TARGET)
 
 release:
 	$(MAKE) clean
-	$(MAKE) all CFLAGS_PROFILE=pre10b RINHA_ENABLE_METRICS=1
+	$(MAKE) all CFLAGS_PROFILE=pre10b RINHA_ENABLE_METRICS=0
 
 fdlb-release:
 	$(MAKE) clean
-	$(MAKE) fdlb CFLAGS_PROFILE=current RINHA_ENABLE_METRICS=1
+	$(MAKE) fdlb CFLAGS_PROFILE=current RINHA_ENABLE_METRICS=0
 
 $(TARGET): $(OBJECTS)
 	$(CC) $(OBJECTS) -pthread $(LDFLAGS) -o $@

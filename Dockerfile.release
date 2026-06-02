@@ -3,7 +3,7 @@
 FROM --platform=$BUILDPLATFORM gcc:13-bookworm AS build
 WORKDIR /src
 ARG CFLAGS_PROFILE=pre10b
-ARG RINHA_ENABLE_METRICS=1
+ARG RINHA_ENABLE_METRICS=0
 
 COPY Makefile ./
 COPY include ./include

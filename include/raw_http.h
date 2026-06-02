@@ -66,6 +66,7 @@ typedef struct {
     const char *exec_mode;
     raw_http_process_mode process_mode;
     raw_http_async_runtime *async_runtime;
+    bool fast_fraud_parser;
     uint32_t workers;
     uint32_t queue_size;
 } raw_http_app;

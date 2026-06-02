@@ -2,7 +2,7 @@ FROM gcc:13-bookworm AS builder
 
 WORKDIR /src
 ARG CFLAGS_PROFILE=current
-ARG RINHA_ENABLE_METRICS=1
+ARG RINHA_ENABLE_METRICS=0
 COPY Makefile ./
 COPY include ./include
 COPY src ./src

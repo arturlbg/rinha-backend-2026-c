@@ -44,6 +44,32 @@ typedef struct fdpass_runtime {
 
 #define FDPASS_FEEDBACK_BYTE 'C'
 
+static bool socket_env_bool(const char *name, bool fallback) {
+    const char *value = getenv(name);
+    if (value == NULL || value[0] == '\0') {
+        return fallback;
+    }
+    if (strcmp(value, "1") == 0 ||
+        strcmp(value, "true") == 0 ||
+        strcmp(value, "TRUE") == 0 ||
+        strcmp(value, "yes") == 0 ||
+        strcmp(value, "YES") == 0 ||
+        strcmp(value, "on") == 0 ||
+        strcmp(value, "ON") == 0) {
+        return true;
+    }
+    if (strcmp(value, "0") == 0 ||
+        strcmp(value, "false") == 0 ||
+        strcmp(value, "FALSE") == 0 ||
+        strcmp(value, "no") == 0 ||
+        strcmp(value, "NO") == 0 ||
+        strcmp(value, "off") == 0 ||
+        strcmp(value, "OFF") == 0) {
+        return false;
+    }
+    return fallback;
+}
+
 static int mkdir_parent(const char *path) {
     const char *slash = strrchr(path, '/');
     if (slash == NULL || slash == path) {
@@ -76,9 +102,13 @@ static void tune_client_fd(int fd, bool nonblocking) {
     }
 
     int enabled = 1;
-    (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled));
+    if (socket_env_bool("RINHA_API_TCP_NODELAY", true)) {
+        (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled));
+    }
 #ifdef TCP_QUICKACK
-    (void)setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &enabled, sizeof(enabled));
+    if (socket_env_bool("RINHA_API_TCP_QUICKACK", true)) {
+        (void)setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &enabled, sizeof(enabled));
+    }
 #endif
 }
 

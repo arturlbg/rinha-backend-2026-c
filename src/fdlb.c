@@ -6,6 +6,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <stdbool.h>
 #include <signal.h>
 #include <stdio.h>
@@ -19,9 +20,21 @@
 
 #define FDLB_MAX_UPSTREAMS 16
 #define FDLB_UPSTREAMS_BUFFER_SIZE 2048
-#define FDLB_LISTEN_BACKLOG 4096
+#define FDLB_DEFAULT_LISTEN_BACKLOG 4096U
 #define FDLB_FEEDBACK_BYTE 'C'
 #define FDLB_METRICS_INTERVAL 100ULL
+
+#ifndef TCP_DEFER_ACCEPT
+#define TCP_DEFER_ACCEPT 9
+#endif
+
+#ifndef TCP_FASTOPEN
+#define TCP_FASTOPEN 23
+#endif
+
+#ifndef SO_BUSY_POLL
+#define SO_BUSY_POLL 46
+#endif
 
 typedef struct {
     const char *path;
@@ -317,7 +330,33 @@ static int parse_listen_addr(const char *addr, uint16_t *port, struct in_addr *b
     return 0;
 }
 
-static int open_listen_socket(const char *listen_addr) {
+static void apply_optional_socket_tuning(int fd, const FdlbConfig *config) {
+    int enabled = 1;
+    if (config == NULL) {
+        return;
+    }
+
+#ifdef SO_REUSEPORT
+    if (config->reuseport) {
+        (void)setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &enabled, sizeof(enabled));
+    }
+#endif
+    if (config->tcp_defer_accept) {
+        (void)setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &enabled, sizeof(enabled));
+    }
+    if (config->tcp_fastopen) {
+        int backlog = config->listen_backlog == 0U ?
+            (int)FDLB_DEFAULT_LISTEN_BACKLOG : (int)config->listen_backlog;
+        (void)setsockopt(fd, IPPROTO_TCP, TCP_FASTOPEN, &backlog, sizeof(backlog));
+    }
+    if (config->so_busy_poll_us > 0U) {
+        int busy_poll_us = (int)config->so_busy_poll_us;
+        (void)setsockopt(fd, SOL_SOCKET, SO_BUSY_POLL, &busy_poll_us, sizeof(busy_poll_us));
+    }
+}
+
+static int open_listen_socket(const FdlbConfig *config) {
+    const char *listen_addr = config == NULL ? NULL : config->listen_addr;
     uint16_t port = 0;
     struct in_addr bind_addr;
     if (parse_listen_addr(listen_addr, &port, &bind_addr) != 0) {
@@ -331,9 +370,7 @@ static int open_listen_socket(const char *listen_addr) {
 
     int enabled = 1;
     (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled));
-#ifdef SO_REUSEPORT
-    (void)setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &enabled, sizeof(enabled));
-#endif
+    apply_optional_socket_tuning(fd, config);
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -348,7 +385,9 @@ static int open_listen_socket(const char *listen_addr) {
         return -1;
     }
 
-    if (listen(fd, FDLB_LISTEN_BACKLOG) != 0) {
+    uint32_t backlog = config == NULL || config->listen_backlog == 0U ?
+        FDLB_DEFAULT_LISTEN_BACKLOG : config->listen_backlog;
+    if (listen(fd, (int)backlog) != 0) {
         int saved_errno = errno;
         close(fd);
         errno = saved_errno;
@@ -540,6 +579,105 @@ static void print_metrics(const FdlbMetrics *metrics,
     }
 }
 
+static bool lean_deliver_fd(FdlbUpstream *upstreams,
+                            size_t upstream_count,
+                            size_t *cursor,
+                            int client_fd,
+                            uint32_t retry_ms) {
+    if (upstreams == NULL || upstream_count == 0U || cursor == NULL) {
+        return false;
+    }
+
+    for (size_t attempt = 0; attempt < upstream_count; attempt++) {
+        size_t selected = fdlb_round_robin_next(cursor, upstream_count);
+        FdlbUpstream *upstream = &upstreams[selected];
+        if (upstream->fd < 0) {
+            upstream->fd = connect_unix_with_retry(upstream->path, retry_ms, retry_ms * 4U);
+            if (upstream->fd < 0) {
+                continue;
+            }
+        }
+
+        if (fdlb_send_one_fd(upstream->fd, client_fd) == 0) {
+            return true;
+        }
+
+        close(upstream->fd);
+        upstream->fd = connect_unix_with_retry(upstream->path, retry_ms, retry_ms * 4U);
+        if (upstream->fd >= 0 && fdlb_send_one_fd(upstream->fd, client_fd) == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static int fdlb_run_lean(const FdlbConfig *config, char **paths, size_t upstream_count) {
+    FdlbUpstream upstreams[FDLB_MAX_UPSTREAMS];
+    memset(upstreams, 0, sizeof(upstreams));
+    for (size_t i = 0; i < upstream_count; i++) {
+        upstreams[i].path = paths[i];
+        upstreams[i].fd = connect_unix_with_retry(paths[i],
+                                                  config->connect_retry_ms,
+                                                  config->startup_timeout_ms);
+        if (upstreams[i].fd < 0) {
+            fprintf(stderr, "failed to connect upstream %s: %s\n", paths[i], strerror(errno));
+            for (size_t j = 0; j < i; j++) {
+                close(upstreams[j].fd);
+            }
+            return 1;
+        }
+    }
+
+    int listen_fd = open_listen_socket(config);
+    if (listen_fd < 0) {
+        perror("listen");
+        for (size_t i = 0; i < upstream_count; i++) {
+            close(upstreams[i].fd);
+        }
+        return 1;
+    }
+
+    fprintf(stderr,
+            "fdlb lean listening on %s with %zu upstreams backlog=%u defer_accept=%u fastopen=%u busy_poll_us=%u reuseport=%u\n",
+            config->listen_addr,
+            upstream_count,
+            config->listen_backlog == 0U ? FDLB_DEFAULT_LISTEN_BACKLOG : config->listen_backlog,
+            config->tcp_defer_accept ? 1U : 0U,
+            config->tcp_fastopen ? 1U : 0U,
+            config->so_busy_poll_us,
+            config->reuseport ? 1U : 0U);
+
+    size_t cursor = 0;
+    uint32_t retry_ms = config->connect_retry_ms == 0U ? 25U : config->connect_retry_ms;
+    for (; !fdlb_stop_requested;) {
+        int client_fd = accept_client(listen_fd);
+        if (client_fd < 0) {
+            if (fdlb_stop_requested) {
+                break;
+            }
+            if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM) {
+                sleep_ms(1);
+            }
+            continue;
+        }
+
+        if (!lean_deliver_fd(upstreams, upstream_count, &cursor, client_fd, retry_ms)) {
+            close(client_fd);
+            continue;
+        }
+        close(client_fd);
+    }
+
+    close(listen_fd);
+    for (size_t i = 0; i < upstream_count; i++) {
+        if (upstreams[i].fd >= 0) {
+            close(upstreams[i].fd);
+        }
+    }
+    return 0;
+}
+
 int fdlb_run(const FdlbConfig *config) {
     if (config == NULL || config->listen_addr == NULL || config->upstreams == NULL) {
         errno = EINVAL;
@@ -561,6 +699,12 @@ int fdlb_run(const FdlbConfig *config) {
         return 1;
     }
 
+    fdlb_stop_requested = 0;
+    install_signal_handlers();
+    if (config->lean) {
+        return fdlb_run_lean(config, paths, upstream_count);
+    }
+
     FdlbStrategy strategy;
     if (!fdlb_parse_strategy(config->strategy, &strategy)) {
         fprintf(stderr, "invalid RINHA_FDLB_STRATEGY=%s\n", config->strategy);
@@ -570,8 +714,6 @@ int fdlb_run(const FdlbConfig *config) {
     FdlbMetrics metrics;
     memset(&metrics, 0, sizeof(metrics));
     metrics.enabled = config->metrics_enabled;
-    fdlb_stop_requested = 0;
-    install_signal_handlers();
 
     FdlbUpstream upstreams[FDLB_MAX_UPSTREAMS];
     memset(upstreams, 0, sizeof(upstreams));
@@ -590,7 +732,7 @@ int fdlb_run(const FdlbConfig *config) {
         }
     }
 
-    int listen_fd = open_listen_socket(config->listen_addr);
+    int listen_fd = open_listen_socket(config);
     if (listen_fd < 0) {
         perror("listen");
         for (size_t i = 0; i < upstream_count; i++) {
@@ -599,8 +741,16 @@ int fdlb_run(const FdlbConfig *config) {
         return 1;
     }
 
-    fprintf(stderr, "fdlb listening on %s with %zu upstreams strategy=%u\n",
-            config->listen_addr, upstream_count, (unsigned)strategy);
+    fprintf(stderr,
+            "fdlb listening on %s with %zu upstreams strategy=%u backlog=%u defer_accept=%u fastopen=%u busy_poll_us=%u reuseport=%u\n",
+            config->listen_addr,
+            upstream_count,
+            (unsigned)strategy,
+            config->listen_backlog == 0U ? FDLB_DEFAULT_LISTEN_BACKLOG : config->listen_backlog,
+            config->tcp_defer_accept ? 1U : 0U,
+            config->tcp_fastopen ? 1U : 0U,
+            config->so_busy_poll_us,
+            config->reuseport ? 1U : 0U);
 
     size_t cursor = 0;
     for (; !fdlb_stop_requested;) {
