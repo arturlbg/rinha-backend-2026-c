@@ -1,17 +1,14 @@
 services:
   lb:
-    image: ghcr.io/arturlbg/rinha-backend-2026-c:fdlb-canary
+    image: ghcr.io/arturlbg/rinha-backend-2026-c:fdlb
     platform: linux/amd64
     ports:
       - "9999:9999"
     environment:
       RINHA_LB_ADDR: ":9999"
       RINHA_FDPASS_UPSTREAMS: "/sockets/api1.ctrl,/sockets/api2.ctrl"
-      RINHA_FDLB_LEAN: "true"
-      RINHA_FDLB_STRATEGY: "round_robin"
-      RINHA_FDLB_TCP_DEFER_ACCEPT: "false"
-      RINHA_FDLB_TCP_FASTOPEN: "false"
-      RINHA_FDLB_SO_BUSY_POLL_US: "0"
+      RINHA_LB_CONNECT_RETRY_MS: "25"
+      RINHA_LB_STARTUP_TIMEOUT_MS: "10000"
     volumes:
       - sockets:/sockets
     depends_on:
@@ -19,85 +16,64 @@ services:
         condition: service_healthy
       api2:
         condition: service_healthy
+    cpus: "0.05"
+    mem_limit: 16m
     networks:
       - rinha
-    deploy:
-      resources:
-        limits:
-          cpus: "0.05"
-          memory: "16MB"
 
   api1:
-    image: ghcr.io/arturlbg/rinha-backend-2026-c:kdprimary2-l64-canary
+    image: ghcr.io/arturlbg/rinha-backend-2026-c:kdprimary2-l64
     platform: linux/amd64
     user: "0:0"
     environment:
-      RINHA_ADDR: ":8080"
+      RINHA_LISTEN_MODE: "fdpass"
+      RINHA_UNIX_SOCKET: "/sockets/api1.ctrl"
       RINHA_SEARCH_IMPL: "kdprimary2"
       RINHA_KDPRIMARY2_PATH: "/app/resources/kdprimary2.bin"
       RINHA_KDPRIMARY2_TOUCH: "true"
-      RINHA_LISTEN_MODE: "fdpass"
       RINHA_EXEC_MODE: "epoll"
-      RINHA_API_PROCESS_MODE: "sync"
-      RINHA_API_PROCESSES: "1"
-      RINHA_UNIX_SOCKET: "/sockets/api1.ctrl"
-      RINHA_FAST_FRAUD_PARSER: "true"
       RINHA_METRICS_ENABLED: "false"
-      RINHA_API_TCP_NODELAY: "true"
-      RINHA_API_TCP_QUICKACK: "true"
     volumes:
       - sockets:/sockets
-    networks:
-      - rinha
     healthcheck:
       test: ["CMD-SHELL", "test -S /sockets/api1.ctrl"]
       interval: 1s
       timeout: 1s
-      retries: 30
+      retries: 60
       start_period: 1s
-    deploy:
-      resources:
-        limits:
-          cpus: "0.475"
-          memory: "167MB"
+    cpus: "0.475"
+    mem_limit: 167m
+    networks:
+      - rinha
 
   api2:
-    image: ghcr.io/arturlbg/rinha-backend-2026-c:kdprimary2-l64-canary
+    image: ghcr.io/arturlbg/rinha-backend-2026-c:kdprimary2-l64
     platform: linux/amd64
     user: "0:0"
     environment:
-      RINHA_ADDR: ":8080"
+      RINHA_LISTEN_MODE: "fdpass"
+      RINHA_UNIX_SOCKET: "/sockets/api2.ctrl"
       RINHA_SEARCH_IMPL: "kdprimary2"
       RINHA_KDPRIMARY2_PATH: "/app/resources/kdprimary2.bin"
       RINHA_KDPRIMARY2_TOUCH: "true"
-      RINHA_LISTEN_MODE: "fdpass"
       RINHA_EXEC_MODE: "epoll"
-      RINHA_API_PROCESS_MODE: "sync"
-      RINHA_API_PROCESSES: "1"
-      RINHA_UNIX_SOCKET: "/sockets/api2.ctrl"
-      RINHA_FAST_FRAUD_PARSER: "true"
       RINHA_METRICS_ENABLED: "false"
-      RINHA_API_TCP_NODELAY: "true"
-      RINHA_API_TCP_QUICKACK: "true"
     volumes:
       - sockets:/sockets
-    networks:
-      - rinha
     healthcheck:
       test: ["CMD-SHELL", "test -S /sockets/api2.ctrl"]
       interval: 1s
       timeout: 1s
-      retries: 30
+      retries: 60
       start_period: 1s
-    deploy:
-      resources:
-        limits:
-          cpus: "0.475"
-          memory: "167MB"
+    cpus: "0.475"
+    mem_limit: 167m
+    networks:
+      - rinha
+
+volumes:
+  sockets:
 
 networks:
   rinha:
     driver: bridge
-
-volumes:
-  sockets:
