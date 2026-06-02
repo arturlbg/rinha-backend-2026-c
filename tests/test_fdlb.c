@@ -54,6 +54,15 @@ static void test_parse_upstreams(void) {
     assert(strcmp(paths[1], "/sockets/b.ctrl") == 0);
     assert(strcmp(paths[2], "/sockets/c.ctrl") == 0);
 
+    char many[] = "/sockets/api1-0.ctrl,/sockets/api1-1.ctrl,/sockets/api2-0.ctrl,/sockets/api2-1.ctrl";
+    count = 0;
+    assert(fdlb_parse_upstreams(many, paths, 4, &count) == 0);
+    assert(count == 4);
+    assert(strcmp(paths[0], "/sockets/api1-0.ctrl") == 0);
+    assert(strcmp(paths[1], "/sockets/api1-1.ctrl") == 0);
+    assert(strcmp(paths[2], "/sockets/api2-0.ctrl") == 0);
+    assert(strcmp(paths[3], "/sockets/api2-1.ctrl") == 0);
+
     char bad[] = "/sockets/a.ctrl,,/sockets/b.ctrl";
     count = 0;
     assert(fdlb_parse_upstreams(bad, paths, 4, &count) != 0);

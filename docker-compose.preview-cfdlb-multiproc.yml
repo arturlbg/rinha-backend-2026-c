@@ -1,0 +1,89 @@
+services:
+  lb:
+    image: ${RINHA_FDLB_IMAGE:-rinha-c-fdlb:local}
+    platform: linux/amd64
+    ports:
+      - "9999:9999"
+    environment:
+      RINHA_LB_ADDR: ":9999"
+      RINHA_FDPASS_UPSTREAMS: "${RINHA_FDPASS_UPSTREAMS:-/sockets/api1-0.ctrl,/sockets/api1-1.ctrl,/sockets/api2-0.ctrl,/sockets/api2-1.ctrl}"
+      RINHA_FDLB_STRATEGY: "${RINHA_FDLB_STRATEGY:-round_robin}"
+      RINHA_FDLB_METRICS: "${RINHA_FDLB_METRICS:-false}"
+      RINHA_LB_CONNECT_RETRY_MS: "${RINHA_LB_CONNECT_RETRY_MS:-25}"
+      RINHA_LB_STARTUP_TIMEOUT_MS: "${RINHA_LB_STARTUP_TIMEOUT_MS:-10000}"
+    volumes:
+      - sockets:/sockets
+    depends_on:
+      api1:
+        condition: service_healthy
+      api2:
+        condition: service_healthy
+    cpus: "${LB_CPUS:-0.05}"
+    mem_limit: "${LB_MEMORY:-16m}"
+    networks:
+      - rinha
+
+  api1:
+    image: ${RINHA_API_IMAGE:-rinha-c-preview:kdprimary2-l64}
+    platform: linux/amd64
+    user: "0:0"
+    environment:
+      RINHA_LISTEN_MODE: "fdpass"
+      RINHA_UNIX_SOCKET: "/sockets/api1.ctrl"
+      RINHA_API_PROCESSES: "${RINHA_API_PROCESSES:-2}"
+      RINHA_SEARCH_IMPL: "kdprimary2"
+      RINHA_KDPRIMARY2_PATH: "/app/resources/kdprimary2.bin"
+      RINHA_KDPRIMARY2_TOUCH: "true"
+      RINHA_EXEC_MODE: "epoll"
+      RINHA_API_PROCESS_MODE: "${RINHA_API_PROCESS_MODE:-sync}"
+      RINHA_API_WORKERS: "${RINHA_API_WORKERS:-1}"
+      RINHA_FD_QUEUE_SIZE: "${RINHA_FD_QUEUE_SIZE:-1024}"
+      RINHA_METRICS_ENABLED: "${RINHA_METRICS_ENABLED:-false}"
+    volumes:
+      - sockets:/sockets
+    healthcheck:
+      test: ["CMD-SHELL", "n=$${RINHA_API_PROCESSES:-2}; if [ \"$${n}\" = \"1\" ]; then test -S /sockets/api1.ctrl; elif [ \"$${n}\" = \"2\" ]; then test -S /sockets/api1-0.ctrl && test -S /sockets/api1-1.ctrl; elif [ \"$${n}\" = \"3\" ]; then test -S /sockets/api1-0.ctrl && test -S /sockets/api1-1.ctrl && test -S /sockets/api1-2.ctrl; else exit 1; fi"]
+      interval: 1s
+      timeout: 1s
+      retries: 60
+      start_period: 1s
+    cpus: "${API_CPUS:-0.475}"
+    mem_limit: "${API_MEMORY:-167m}"
+    networks:
+      - rinha
+
+  api2:
+    image: ${RINHA_API_IMAGE:-rinha-c-preview:kdprimary2-l64}
+    platform: linux/amd64
+    user: "0:0"
+    environment:
+      RINHA_LISTEN_MODE: "fdpass"
+      RINHA_UNIX_SOCKET: "/sockets/api2.ctrl"
+      RINHA_API_PROCESSES: "${RINHA_API_PROCESSES:-2}"
+      RINHA_SEARCH_IMPL: "kdprimary2"
+      RINHA_KDPRIMARY2_PATH: "/app/resources/kdprimary2.bin"
+      RINHA_KDPRIMARY2_TOUCH: "true"
+      RINHA_EXEC_MODE: "epoll"
+      RINHA_API_PROCESS_MODE: "${RINHA_API_PROCESS_MODE:-sync}"
+      RINHA_API_WORKERS: "${RINHA_API_WORKERS:-1}"
+      RINHA_FD_QUEUE_SIZE: "${RINHA_FD_QUEUE_SIZE:-1024}"
+      RINHA_METRICS_ENABLED: "${RINHA_METRICS_ENABLED:-false}"
+    volumes:
+      - sockets:/sockets
+    healthcheck:
+      test: ["CMD-SHELL", "n=$${RINHA_API_PROCESSES:-2}; if [ \"$${n}\" = \"1\" ]; then test -S /sockets/api2.ctrl; elif [ \"$${n}\" = \"2\" ]; then test -S /sockets/api2-0.ctrl && test -S /sockets/api2-1.ctrl; elif [ \"$${n}\" = \"3\" ]; then test -S /sockets/api2-0.ctrl && test -S /sockets/api2-1.ctrl && test -S /sockets/api2-2.ctrl; else exit 1; fi"]
+      interval: 1s
+      timeout: 1s
+      retries: 60
+      start_period: 1s
+    cpus: "${API_CPUS:-0.475}"
+    mem_limit: "${API_MEMORY:-167m}"
+    networks:
+      - rinha
+
+volumes:
+  sockets:
+
+networks:
+  rinha:
+    driver: bridge

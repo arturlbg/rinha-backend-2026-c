@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include "config.h"
 #include "fdpass.h"
 #include "ivf8_index.h"
@@ -12,15 +14,31 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 typedef enum {
     INDEX_WARMUP_OFF = 0,
     INDEX_WARMUP_TOUCH = 1,
     INDEX_WARMUP_SEARCH = 2
 } index_warmup_mode;
+
+typedef struct {
+    const char *addr;
+    const char *listen_mode;
+    const char *exec_mode_text;
+    fdpass_exec_mode exec_mode;
+    uint32_t workers;
+    uint32_t queue_size;
+    raw_http_process_mode process_mode;
+    uint32_t api_workers;
+} api_runtime_options;
+
+static volatile sig_atomic_t api_supervisor_stop_requested = 0;
 
 static unsigned int env_u32(const char *name, unsigned int fallback) {
     const char *raw = getenv(name);
@@ -135,6 +153,225 @@ static void run_index_warmup(const Ivf8Index *index,
             (unsigned long long)sink);
 }
 
+static void handle_supervisor_signal(int signum) {
+    (void)signum;
+    api_supervisor_stop_requested = 1;
+}
+
+static int install_supervisor_signal_handlers(void) {
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = handle_supervisor_signal;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGTERM, &action, NULL) != 0) {
+        return -1;
+    }
+    if (sigaction(SIGINT, &action, NULL) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static void restore_default_signal_handlers(void) {
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = SIG_DFL;
+    sigemptyset(&action.sa_mask);
+    (void)sigaction(SIGTERM, &action, NULL);
+    (void)sigaction(SIGINT, &action, NULL);
+}
+
+static int run_api_server(const api_runtime_options *options,
+                          const char *unix_socket,
+                          const raw_http_app *app_template) {
+    if (options == NULL || app_template == NULL) {
+        errno = EINVAL;
+        return 1;
+    }
+
+    raw_http_async_runtime *async_runtime = NULL;
+    raw_http_app app = *app_template;
+    if (options->process_mode == RAW_HTTP_PROCESS_ASYNC_WORKER) {
+        if (raw_http_async_runtime_create(&async_runtime,
+                                          options->api_workers,
+                                          options->queue_size) != 0) {
+            fprintf(stderr, "failed to start async request workers\n");
+            return 1;
+        }
+#if RINHA_ENABLE_METRICS
+        if (app.metrics != NULL) {
+            metrics_add(&app.metrics->async_worker_count, options->api_workers);
+        }
+#endif
+        fprintf(stderr,
+                "api_process mode=async_worker workers=%u queue_size=%u\n",
+                options->api_workers,
+                options->queue_size);
+    } else {
+        fprintf(stderr, "api_process mode=sync\n");
+    }
+    app.async_runtime = async_runtime;
+    app.workers = options->process_mode == RAW_HTTP_PROCESS_ASYNC_WORKER ?
+        options->api_workers : options->workers;
+    app.queue_size = options->queue_size;
+
+    fdpass_options fdpass_opts = {
+        .exec_mode = options->exec_mode,
+        .workers = options->workers,
+        .queue_size = options->queue_size,
+    };
+
+    int serve_result = 0;
+    if (strcmp(options->listen_mode, "tcp") == 0) {
+        if (options->exec_mode == FDPASS_EXEC_EPOLL) {
+            serve_result = raw_http_serve_epoll(options->addr, &app);
+        } else {
+            serve_result = raw_http_serve(options->addr, &app);
+        }
+    } else if (strcmp(options->listen_mode, "fdpass") == 0) {
+        serve_result = fdpass_serve(unix_socket, &app, &fdpass_opts);
+    } else {
+        fprintf(stderr, "invalid RINHA_LISTEN_MODE=%s\n", options->listen_mode);
+        raw_http_async_runtime_destroy(async_runtime);
+        return 1;
+    }
+
+    if (serve_result != 0) {
+        perror("serve");
+        raw_http_async_runtime_destroy(async_runtime);
+        return 1;
+    }
+    raw_http_async_runtime_destroy(async_runtime);
+    return 0;
+}
+
+static void terminate_api_children(pid_t *children, unsigned int count) {
+    for (unsigned int i = 0; i < count; i++) {
+        if (children[i] > 0) {
+            (void)kill(children[i], SIGTERM);
+        }
+    }
+}
+
+static void mark_child_exited(pid_t *children, unsigned int count, pid_t pid) {
+    for (unsigned int i = 0; i < count; i++) {
+        if (children[i] == pid) {
+            children[i] = 0;
+            return;
+        }
+    }
+}
+
+static int wait_for_api_children(pid_t *children, unsigned int count) {
+    unsigned int live = count;
+    int exit_code = 0;
+    while (live > 0) {
+        int status = 0;
+        pid_t pid = waitpid(-1, &status, 0);
+        if (pid < 0) {
+            if (errno == EINTR) {
+                if (api_supervisor_stop_requested) {
+                    terminate_api_children(children, count);
+                }
+                continue;
+            }
+            if (errno == ECHILD) {
+                break;
+            }
+            perror("waitpid");
+            terminate_api_children(children, count);
+            return 1;
+        }
+
+        mark_child_exited(children, count, pid);
+        live--;
+
+        if (api_supervisor_stop_requested) {
+            continue;
+        }
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            fprintf(stderr, "api child pid=%ld exited cleanly; stopping supervisor\n", (long)pid);
+        } else if (WIFEXITED(status)) {
+            fprintf(stderr,
+                    "api child pid=%ld exited status=%d; terminating siblings\n",
+                    (long)pid,
+                    WEXITSTATUS(status));
+        } else if (WIFSIGNALED(status)) {
+            fprintf(stderr,
+                    "api child pid=%ld terminated by signal=%d; terminating siblings\n",
+                    (long)pid,
+                    WTERMSIG(status));
+        } else {
+            fprintf(stderr, "api child pid=%ld stopped unexpectedly; terminating siblings\n", (long)pid);
+        }
+        exit_code = 1;
+        api_supervisor_stop_requested = 1;
+        terminate_api_children(children, count);
+    }
+    return exit_code;
+}
+
+static int run_api_process_group(const api_runtime_options *options,
+                                 const char *base_unix_socket,
+                                 const raw_http_app *app_template,
+                                 unsigned int process_count) {
+    if (process_count <= 1u) {
+        return run_api_server(options, base_unix_socket, app_template);
+    }
+    if (strcmp(options->listen_mode, "fdpass") != 0) {
+        fprintf(stderr,
+                "RINHA_API_PROCESSES=%u requires RINHA_LISTEN_MODE=fdpass; direct TCP supports one API process\n",
+                process_count);
+        return 1;
+    }
+    if (install_supervisor_signal_handlers() != 0) {
+        perror("sigaction");
+        return 1;
+    }
+
+    pid_t children[RINHA_MAX_API_PROCESSES];
+    memset(children, 0, sizeof(children));
+
+    for (unsigned int i = 0; i < process_count; i++) {
+        char child_socket[RINHA_UNIX_SOCKET_PATH_MAX];
+        if (rinha_child_unix_socket_path(base_unix_socket,
+                                         i,
+                                         process_count,
+                                         child_socket,
+                                         sizeof(child_socket)) != 0) {
+            fprintf(stderr,
+                    "derived Unix socket path is too long for child=%u base=%s\n",
+                    i,
+                    base_unix_socket);
+            terminate_api_children(children, i);
+            (void)wait_for_api_children(children, i);
+            return 1;
+        }
+
+        pid_t pid = fork();
+        if (pid < 0) {
+            perror("fork");
+            terminate_api_children(children, i);
+            (void)wait_for_api_children(children, i);
+            return 1;
+        }
+        if (pid == 0) {
+            restore_default_signal_handlers();
+            int child_result = run_api_server(options, child_socket, app_template);
+            _exit(child_result == 0 ? 0 : 1);
+        }
+
+        children[i] = pid;
+        fprintf(stderr,
+                "api_process child=%u pid=%ld unix_socket=%s\n",
+                i,
+                (long)pid,
+                child_socket);
+    }
+
+    return wait_for_api_children(children, process_count);
+}
+
 int main(void) {
     const char *addr = getenv("RINHA_ADDR");
     if (addr == NULL || addr[0] == '\0') {
@@ -168,6 +405,20 @@ int main(void) {
         return 1;
     }
     uint32_t api_workers = env_u32("RINHA_API_WORKERS", RINHA_DEFAULT_WORKERS);
+    unsigned int api_processes = RINHA_DEFAULT_API_PROCESSES;
+    if (!rinha_parse_api_processes(getenv("RINHA_API_PROCESSES"), &api_processes)) {
+        fprintf(stderr,
+                "invalid RINHA_API_PROCESSES=%s (expected 1..%u)\n",
+                getenv("RINHA_API_PROCESSES") == NULL ? "" : getenv("RINHA_API_PROCESSES"),
+                RINHA_MAX_API_PROCESSES);
+        return 1;
+    }
+    if (api_processes > 1u && strcmp(listen_mode, "fdpass") != 0) {
+        fprintf(stderr,
+                "RINHA_API_PROCESSES=%u requires RINHA_LISTEN_MODE=fdpass; direct TCP supports one API process\n",
+                api_processes);
+        return 1;
+    }
 
 #if RINHA_ENABLE_METRICS
     RinhaMetrics metrics;
@@ -314,27 +565,6 @@ int main(void) {
     uint32_t warmup_queries = env_u32("RINHA_INDEX_WARMUP_QUERIES", RINHA_DEFAULT_INDEX_WARMUP_QUERIES);
     bool use_madvise = metrics_parse_enabled(getenv("RINHA_INDEX_MADVISE"));
 
-    raw_http_async_runtime *async_runtime = NULL;
-    if (process_mode == RAW_HTTP_PROCESS_ASYNC_WORKER) {
-        if (raw_http_async_runtime_create(&async_runtime, api_workers, queue_size) != 0) {
-            fprintf(stderr, "failed to start async request workers\n");
-            kdtree_free(&kdtree);
-            kdprimary2_close(&kdprimary2);
-            kdprimary_close(&kdprimary);
-            ivf8_index_close(&index);
-            return 1;
-        }
-#if RINHA_ENABLE_METRICS
-        metrics_add(&metrics.async_worker_count, api_workers);
-#endif
-        fprintf(stderr,
-                "api_process mode=async_worker workers=%u queue_size=%u\n",
-                api_workers,
-                queue_size);
-    } else {
-        fprintf(stderr, "api_process mode=sync\n");
-    }
-
     raw_http_app app = {
         .index = search_mode == RAW_HTTP_SEARCH_IVF8 ? &index : NULL,
         .kdprimary = search_mode == RAW_HTTP_SEARCH_KDPRIMARY ? &kdprimary : NULL,
@@ -356,7 +586,7 @@ int main(void) {
         .listen_mode = listen_mode,
         .exec_mode = exec_mode_text,
         .process_mode = process_mode,
-        .async_runtime = async_runtime,
+        .async_runtime = NULL,
         .workers = process_mode == RAW_HTTP_PROCESS_ASYNC_WORKER ? api_workers : workers,
         .queue_size = queue_size,
     };
@@ -365,24 +595,23 @@ int main(void) {
         run_index_warmup(&index, &app.search_config, warmup_mode, warmup_queries, use_madvise);
     }
 
-    fdpass_options fdpass_opts = {
+    api_runtime_options runtime_options = {
+        .addr = addr,
+        .listen_mode = listen_mode,
+        .exec_mode_text = exec_mode_text,
         .exec_mode = exec_mode,
         .workers = workers,
         .queue_size = queue_size,
+        .process_mode = process_mode,
+        .api_workers = api_workers,
     };
 
-    int serve_result;
-    if (strcmp(listen_mode, "tcp") == 0) {
-        if (exec_mode == FDPASS_EXEC_EPOLL) {
-            serve_result = raw_http_serve_epoll(addr, &app);
-        } else {
-            serve_result = raw_http_serve(addr, &app);
-        }
-    } else if (strcmp(listen_mode, "fdpass") == 0) {
-        serve_result = fdpass_serve(unix_socket, &app, &fdpass_opts);
-    } else {
-        fprintf(stderr, "invalid RINHA_LISTEN_MODE=%s\n", listen_mode);
-        raw_http_async_runtime_destroy(async_runtime);
+    int serve_result = run_api_process_group(&runtime_options,
+                                             unix_socket,
+                                             &app,
+                                             api_processes);
+
+    if (serve_result != 0) {
         kdtree_free(&kdtree);
         kdprimary2_close(&kdprimary2);
         kdprimary_close(&kdprimary);
@@ -390,16 +619,6 @@ int main(void) {
         return 1;
     }
 
-    if (serve_result != 0) {
-        perror("serve");
-        raw_http_async_runtime_destroy(async_runtime);
-        kdtree_free(&kdtree);
-        kdprimary2_close(&kdprimary2);
-        kdprimary_close(&kdprimary);
-        ivf8_index_close(&index);
-        return 1;
-    }
-    raw_http_async_runtime_destroy(async_runtime);
     kdtree_free(&kdtree);
     kdprimary2_close(&kdprimary2);
     kdprimary_close(&kdprimary);
