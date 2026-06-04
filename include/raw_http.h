@@ -9,11 +9,13 @@
 #include "config.h"
 #include "ivf8_index.h"
 #include "ivf8_search.h"
+#include "kdclass3.h"
 #include "kdprimary.h"
 #include "kdprimary2.h"
 #include "kdtree.h"
 #include "kdtree_repair.h"
 #include "metrics.h"
+#include "rf_gate_model.h"
 
 #define RAW_HTTP_CONN_WANT_READ 1u
 #define RAW_HTTP_CONN_WANT_WRITE 2u
@@ -36,7 +38,9 @@ typedef enum {
 typedef enum {
     RAW_HTTP_SEARCH_IVF8 = 0,
     RAW_HTTP_SEARCH_KDPRIMARY = 1,
-    RAW_HTTP_SEARCH_KDPRIMARY2 = 2
+    RAW_HTTP_SEARCH_KDPRIMARY2 = 2,
+    RAW_HTTP_SEARCH_KDCLASS3 = 3,
+    RAW_HTTP_SEARCH_RF_KDCLASS3 = 4
 } raw_http_search_mode;
 
 typedef enum {
@@ -56,14 +60,17 @@ typedef struct {
     const Ivf8Index *index;
     const KdPrimaryIndex *kdprimary;
     const KdPrimary2Index *kdprimary2;
+    const KdClass3Index *kdclass3;
     const KdTree *kdtree;
     raw_http_search_mode search_mode;
     Ivf8SearchConfig search_config;
     bool kdtree_repair_enabled;
+    bool kdclass3_fallback_kdprimary2;
     KdTreeRepairPolicy kdtree_repair_policy;
     RinhaMetrics *metrics;
     const char *listen_mode;
     const char *exec_mode;
+    const char *debug_instance;
     raw_http_process_mode process_mode;
     raw_http_async_runtime *async_runtime;
     bool fast_fraud_parser;
@@ -108,6 +115,8 @@ typedef struct {
 
 int raw_http_serve(const char *addr, const raw_http_app *app);
 int raw_http_serve_epoll(const char *addr, const raw_http_app *app);
+int raw_http_serve_unix(const char *path, const raw_http_app *app);
+int raw_http_serve_unix_epoll(const char *path, const raw_http_app *app);
 int raw_http_handle_connection(int client_fd, const raw_http_app *app);
 void raw_http_conn_init(raw_http_conn *conn, int client_fd, const raw_http_app *app);
 void raw_http_conn_note_read_event(raw_http_conn *conn);

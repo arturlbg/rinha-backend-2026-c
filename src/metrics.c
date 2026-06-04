@@ -151,6 +151,15 @@ void metrics_observe_value(RinhaValueHistogram *histogram, uint64_t value) {
     atomic_fetch_add_explicit(&histogram->buckets[bucket], 1u, memory_order_relaxed);
 }
 
+void metrics_observe_timing(RinhaTimingSummary *summary, uint64_t ns) {
+    if (summary == NULL) {
+        return;
+    }
+    metrics_inc(&summary->count);
+    metrics_add(&summary->total_ns, ns);
+    metrics_update_max(&summary->max_ns, ns);
+}
+
 static size_t appendf(char *out, size_t cap, size_t used, const char *fmt, ...) {
     if (used >= cap) {
         return used;
@@ -201,11 +210,28 @@ static size_t append_value_histogram(char *out,
     return used;
 }
 
+static size_t append_timing_summary(char *out,
+                                    size_t cap,
+                                    size_t used,
+                                    const char *name,
+                                    const RinhaTimingSummary *summary) {
+    uint64_t count = load_counter(&summary->count);
+    uint64_t total_ns = load_counter(&summary->total_ns);
+    uint64_t max_ns = load_counter(&summary->max_ns);
+    uint64_t avg_ns = count == 0 ? 0 : total_ns / count;
+    used = appendf(out, cap, used, "%s_count=%llu\n", name, (unsigned long long)count);
+    used = appendf(out, cap, used, "%s_total_ns=%llu\n", name, (unsigned long long)total_ns);
+    used = appendf(out, cap, used, "%s_max_ns=%llu\n", name, (unsigned long long)max_ns);
+    used = appendf(out, cap, used, "%s_avg_ns=%llu\n", name, (unsigned long long)avg_ns);
+    return used;
+}
+
 size_t metrics_write_text(const RinhaMetrics *metrics,
                           char *out,
                           size_t cap,
                           const char *listen_mode,
                           const char *exec_mode,
+                          const char *debug_instance,
                           uint32_t workers,
                           uint32_t queue_size) {
     if (out == NULL || cap == 0) {
@@ -223,6 +249,8 @@ size_t metrics_write_text(const RinhaMetrics *metrics,
 
     size_t used = 0;
     used = appendf(out, cap, used, "metrics_enabled=1\n");
+    used = appendf(out, cap, used, "debug_timing_enabled=%u\n", metrics->debug_timing_enabled ? 1u : 0u);
+    used = appendf(out, cap, used, "debug_instance=%s\n", debug_instance == NULL ? "" : debug_instance);
     used = appendf(out, cap, used, "listen_mode=%s\n", listen_mode == NULL ? "" : listen_mode);
     used = appendf(out, cap, used, "exec_mode=%s\n", exec_mode == NULL ? "" : exec_mode);
     used = appendf(out, cap, used, "workers=%u\n", workers);
@@ -268,6 +296,10 @@ size_t metrics_write_text(const RinhaMetrics *metrics,
     used = appendf(out, cap, used, "kdprimary2_leaves_visited_max=%llu\n", (unsigned long long)load_counter(&metrics->kdprimary2_leaves_visited_max));
     used = appendf(out, cap, used, "kdprimary2_points_evaluated_max=%llu\n", (unsigned long long)load_counter(&metrics->kdprimary2_points_evaluated_max));
     used = appendf(out, cap, used, "kdprimary2_pruned_branches_max=%llu\n", (unsigned long long)load_counter(&metrics->kdprimary2_pruned_branches_max));
+    used = appendf(out, cap, used, "kdclass3_search_count=%llu\n", (unsigned long long)load_counter(&metrics->kdclass3_search_count));
+    used = appendf(out, cap, used, "kdclass3_fallback_count=%llu\n", (unsigned long long)load_counter(&metrics->kdclass3_fallback_count));
+    used = appendf(out, cap, used, "kdclass3_fraud_decisions=%llu\n", (unsigned long long)load_counter(&metrics->kdclass3_fraud_decisions));
+    used = appendf(out, cap, used, "kdclass3_legit_decisions=%llu\n", (unsigned long long)load_counter(&metrics->kdclass3_legit_decisions));
     used = appendf(out, cap, used, "requests_per_connection_1=%llu\n", (unsigned long long)load_counter(&metrics->requests_per_connection_1));
     used = appendf(out, cap, used, "requests_per_connection_2_5=%llu\n", (unsigned long long)load_counter(&metrics->requests_per_connection_2_5));
     used = appendf(out, cap, used, "requests_per_connection_6_20=%llu\n", (unsigned long long)load_counter(&metrics->requests_per_connection_6_20));
@@ -296,6 +328,10 @@ size_t metrics_write_text(const RinhaMetrics *metrics,
     used = append_histogram(out, cap, used, "async_job_wait", &metrics->async_job_wait);
     used = append_histogram(out, cap, used, "async_job_compute", &metrics->async_job_compute);
     used = append_histogram(out, cap, used, "async_completion_to_write", &metrics->async_completion_to_write);
+    used = append_timing_summary(out, cap, used, "timing_fraud_handler", &metrics->timing_fraud_handler);
+    used = append_timing_summary(out, cap, used, "timing_http_parse", &metrics->timing_http_parse);
+    used = append_timing_summary(out, cap, used, "timing_search", &metrics->timing_search);
+    used = append_timing_summary(out, cap, used, "timing_write_response", &metrics->timing_write_response);
     used = append_value_histogram(out, cap, used, "kdprimary2_nodes_visited", &metrics->kdprimary2_nodes_visited);
     used = append_value_histogram(out, cap, used, "kdprimary2_leaves_visited", &metrics->kdprimary2_leaves_visited);
     used = append_value_histogram(out, cap, used, "kdprimary2_points_evaluated", &metrics->kdprimary2_points_evaluated);

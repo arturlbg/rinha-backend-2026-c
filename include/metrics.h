@@ -18,7 +18,14 @@ typedef struct {
 } RinhaValueHistogram;
 
 typedef struct {
+    atomic_uint_fast64_t count;
+    atomic_uint_fast64_t total_ns;
+    atomic_uint_fast64_t max_ns;
+} RinhaTimingSummary;
+
+typedef struct {
     bool enabled;
+    bool debug_timing_enabled;
 
     atomic_uint_fast64_t open_connections;
     atomic_uint_fast64_t max_open_connections;
@@ -59,6 +66,10 @@ typedef struct {
     atomic_uint_fast64_t kdprimary2_leaves_visited_max;
     atomic_uint_fast64_t kdprimary2_points_evaluated_max;
     atomic_uint_fast64_t kdprimary2_pruned_branches_max;
+    atomic_uint_fast64_t kdclass3_search_count;
+    atomic_uint_fast64_t kdclass3_fallback_count;
+    atomic_uint_fast64_t kdclass3_fraud_decisions;
+    atomic_uint_fast64_t kdclass3_legit_decisions;
     atomic_uint_fast64_t requests_per_connection_1;
     atomic_uint_fast64_t requests_per_connection_2_5;
     atomic_uint_fast64_t requests_per_connection_6_20;
@@ -87,6 +98,10 @@ typedef struct {
     RinhaMetricHistogram async_job_wait;
     RinhaMetricHistogram async_job_compute;
     RinhaMetricHistogram async_completion_to_write;
+    RinhaTimingSummary timing_fraud_handler;
+    RinhaTimingSummary timing_http_parse;
+    RinhaTimingSummary timing_search;
+    RinhaTimingSummary timing_write_response;
     RinhaValueHistogram kdprimary2_nodes_visited;
     RinhaValueHistogram kdprimary2_leaves_visited;
     RinhaValueHistogram kdprimary2_points_evaluated;
@@ -103,11 +118,13 @@ void metrics_add(atomic_uint_fast64_t *counter, uint64_t value);
 void metrics_update_max(atomic_uint_fast64_t *counter, uint64_t value);
 void metrics_observe(RinhaMetricHistogram *histogram, uint64_t ns);
 void metrics_observe_value(RinhaValueHistogram *histogram, uint64_t value);
+void metrics_observe_timing(RinhaTimingSummary *summary, uint64_t ns);
 size_t metrics_write_text(const RinhaMetrics *metrics,
                           char *out,
                           size_t cap,
                           const char *listen_mode,
                           const char *exec_mode,
+                          const char *debug_instance,
                           uint32_t workers,
                           uint32_t queue_size);
 

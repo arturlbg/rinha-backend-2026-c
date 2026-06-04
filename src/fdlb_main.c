@@ -32,19 +32,28 @@ static bool env_bool(const char *name, bool fallback) {
 }
 
 int main(void) {
+    const char *mode = getenv("RINHA_LB_MODE");
+    if (mode == NULL || *mode == '\0') {
+        mode = "fdpass";
+    }
+
     const char *listen_addr = getenv("RINHA_LB_ADDR");
     if (listen_addr == NULL || *listen_addr == '\0') {
         listen_addr = ":9999";
     }
 
-    const char *upstreams = getenv("RINHA_FDPASS_UPSTREAMS");
+    const char *upstreams = strcmp(mode, "proxy") == 0 ?
+        getenv("RINHA_PROXY_UPSTREAMS") : getenv("RINHA_FDPASS_UPSTREAMS");
     if (upstreams == NULL || *upstreams == '\0') {
-        upstreams = "/sockets/api1.ctrl,/sockets/api2.ctrl";
+        upstreams = strcmp(mode, "proxy") == 0 ?
+            "/sockets/api1.sock,/sockets/api2.sock" :
+            "/sockets/api1.ctrl,/sockets/api2.ctrl";
     }
 
     FdlbConfig config = {
         .listen_addr = listen_addr,
         .upstreams = upstreams,
+        .mode = mode,
         .strategy = getenv("RINHA_FDLB_STRATEGY"),
         .lean = env_bool("RINHA_FDLB_LEAN", false),
         .metrics_enabled = env_bool("RINHA_FDLB_METRICS", false),

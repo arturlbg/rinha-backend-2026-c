@@ -22,6 +22,8 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 typedef struct {
@@ -102,6 +104,14 @@ static RinhaMetrics *app_metrics(const raw_http_app *app) {
     (void)app;
     return NULL;
 #endif
+}
+
+static bool debug_timing_enabled(const RinhaMetrics *metrics) {
+    return metrics != NULL && metrics->debug_timing_enabled;
+}
+
+static uint64_t debug_timing_start(const RinhaMetrics *metrics) {
+    return debug_timing_enabled(metrics) ? metrics_now_ns() : 0u;
 }
 
 static void metrics_note_open_connection(RinhaMetrics *metrics) {
@@ -251,6 +261,16 @@ bool raw_http_search_mode_from_string(const char *value,
     }
     if (value != NULL && strcmp(value, "kdprimary2") == 0) {
         *mode = RAW_HTTP_SEARCH_KDPRIMARY2;
+        *ivf8_impl = IVF8_SEARCH_IMPL_SCALAR;
+        return true;
+    }
+    if (value != NULL && strcmp(value, "kdclass3") == 0) {
+        *mode = RAW_HTTP_SEARCH_KDCLASS3;
+        *ivf8_impl = IVF8_SEARCH_IMPL_SCALAR;
+        return true;
+    }
+    if (value != NULL && strcmp(value, "rf_kdclass3") == 0) {
+        *mode = RAW_HTTP_SEARCH_RF_KDCLASS3;
         *ivf8_impl = IVF8_SEARCH_IMPL_SCALAR;
         return true;
     }
@@ -490,6 +510,50 @@ static const http_response *search_response_for_query(const raw_http_app *app,
         if (metrics != NULL) {
             metrics_note_kdprimary2_search(metrics, &result, metrics_now_ns() - start);
         }
+    } else if (app->search_mode == RAW_HTTP_SEARCH_KDCLASS3) {
+        KdClass3SearchResult result = kdclass3_search(app->kdclass3, query);
+        if (metrics != NULL) {
+            metrics_inc(&metrics->kdclass3_search_count);
+        }
+        if (result.fallback_required) {
+            if (metrics != NULL) {
+                metrics_inc(&metrics->kdclass3_fallback_count);
+            }
+            if (app->kdclass3_fallback_kdprimary2 && app->kdprimary2 != NULL) {
+                KdPrimary2SearchResult fallback = kdprimary2_search_top5(app->kdprimary2, query);
+                fraud_count = fallback.fraud_count;
+                if (metrics != NULL) {
+                    metrics_note_kdprimary2_search(metrics, &fallback, metrics_now_ns() - start);
+                }
+            } else {
+                fraud_count = 3;
+            }
+        } else {
+            fraud_count = result.fraud_count;
+        }
+        if (metrics != NULL) {
+            if (fraud_count >= 3) {
+                metrics_inc(&metrics->kdclass3_fraud_decisions);
+            } else {
+                metrics_inc(&metrics->kdclass3_legit_decisions);
+            }
+        }
+    } else if (app->search_mode == RAW_HTTP_SEARCH_RF_KDCLASS3) {
+        double probability = 0.0;
+        RfGateDecision decision = rf_gate_decide(query, &probability);
+        (void)probability;
+        if (decision == RF_GATE_DECISION_LEGIT) {
+            fraud_count = 0;
+        } else if (decision == RF_GATE_DECISION_FRAUD) {
+            fraud_count = 3;
+        } else {
+            KdClass3SearchResult result = kdclass3_search(app->kdclass3, query);
+            if (metrics != NULL) {
+                metrics_inc(&metrics->kdclass3_search_count);
+                metrics_inc(&metrics->kdclass3_fallback_count);
+            }
+            fraud_count = result.fallback_required ? 3 : result.fraud_count;
+        }
     } else if (app->kdtree_repair_enabled && app->kdtree != NULL) {
         Ivf8SearchTraceResult trace = ivf8_search_trace(app->index, query, &app->search_config);
         fraud_count = trace.result.fraud_count;
@@ -505,9 +569,34 @@ static const http_response *search_response_for_query(const raw_http_app *app,
         fraud_count = ivf8_search_fraud_count(app->index, query, &app->search_config);
     }
     if (metrics != NULL) {
-        metrics_observe(&metrics->search, metrics_now_ns() - start);
+        uint64_t elapsed = metrics_now_ns() - start;
+        metrics_observe(&metrics->search, elapsed);
+        if (debug_timing_enabled(metrics)) {
+            metrics_observe_timing(&metrics->timing_search, elapsed);
+        }
     }
     return response_for_fraud_count(fraud_count);
+}
+
+static int mkdir_parent_for_unix_socket(const char *path) {
+    const char *slash = strrchr(path, '/');
+    if (slash == NULL || slash == path) {
+        return 0;
+    }
+
+    char dir[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    size_t len = (size_t)(slash - path);
+    if (len >= sizeof(dir)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    memcpy(dir, path, len);
+    dir[len] = '\0';
+
+    if (mkdir(dir, 0777) != 0 && errno != EEXIST) {
+        return -1;
+    }
+    return 0;
 }
 
 static const http_response *route_request(const parsed_request *request, const char *body, const raw_http_app *app) {
@@ -519,20 +608,31 @@ static const http_response *route_request(const parsed_request *request, const c
         return request->method == RAW_HTTP_METHOD_GET ? &RESPONSE_READY : &RESPONSE_METHOD_NOT_ALLOWED;
     }
     if (request->path == RAW_HTTP_PATH_FRAUD_SCORE) {
+        uint64_t handler_start = debug_timing_start(metrics);
+#define RETURN_FRAUD_RESPONSE(resp_) do { \
+            if (debug_timing_enabled(metrics) && handler_start != 0) { \
+                metrics_observe_timing(&metrics->timing_fraud_handler, metrics_now_ns() - handler_start); \
+            } \
+            return (resp_); \
+        } while (0)
         if (metrics != NULL) {
             metrics_inc(&metrics->fraud_count);
         }
         if (request->method != RAW_HTTP_METHOD_POST) {
-            return &RESPONSE_METHOD_NOT_ALLOWED;
+            RETURN_FRAUD_RESPONSE(&RESPONSE_METHOD_NOT_ALLOWED);
         }
         if (!request->content_length_present) {
-            return &RESPONSE_BAD_REQUEST;
+            RETURN_FRAUD_RESPONSE(&RESPONSE_BAD_REQUEST);
         }
         if (app == NULL || body == NULL ||
             (app->search_mode == RAW_HTTP_SEARCH_KDPRIMARY && app->kdprimary == NULL) ||
             (app->search_mode == RAW_HTTP_SEARCH_KDPRIMARY2 && app->kdprimary2 == NULL) ||
+            (app->search_mode == RAW_HTTP_SEARCH_KDCLASS3 &&
+             (app->kdclass3 == NULL ||
+              (app->kdclass3_fallback_kdprimary2 && app->kdprimary2 == NULL))) ||
+            (app->search_mode == RAW_HTTP_SEARCH_RF_KDCLASS3 && app->kdclass3 == NULL) ||
             (app->search_mode == RAW_HTTP_SEARCH_IVF8 && app->index == NULL)) {
-            return &RESPONSE_FRAUD_APPROVED;
+            RETURN_FRAUD_RESPONSE(&RESPONSE_FRAUD_APPROVED);
         }
         int16_t query[FASTVECTOR_DIMENSIONS];
         uint64_t start = metrics != NULL ? metrics_now_ns() : 0u;
@@ -541,12 +641,14 @@ static const http_response *route_request(const parsed_request *request, const c
                 metrics_observe(&metrics->vectorize, metrics_now_ns() - start);
                 metrics_inc(&metrics->vectorize_failures);
             }
-            return &RESPONSE_FRAUD_APPROVED;
+            RETURN_FRAUD_RESPONSE(&RESPONSE_FRAUD_APPROVED);
         }
         if (metrics != NULL) {
             metrics_observe(&metrics->vectorize, metrics_now_ns() - start);
         }
-        return search_response_for_query(app, query, metrics);
+        const http_response *response = search_response_for_query(app, query, metrics);
+        RETURN_FRAUD_RESPONSE(response);
+#undef RETURN_FRAUD_RESPONSE
     }
     return &RESPONSE_NOT_FOUND;
 }
@@ -788,6 +890,7 @@ static size_t build_debug_response(const raw_http_app *app,
                                          cap - body_offset,
                                          app == NULL ? "" : app->listen_mode,
                                          app == NULL ? "" : app->exec_mode,
+                                         app == NULL ? "" : app->debug_instance,
                                          app == NULL ? 0u : app->workers,
                                          app == NULL ? 0u : app->queue_size);
     int header_len = snprintf(out,
@@ -999,7 +1102,15 @@ static int raw_http_handle_connection_loop(int client_fd, const raw_http_app *ap
         size_t header_start = pos;
         size_t header_end = pos + (size_t)relative_header_end;
         parsed_request request;
-        if (parse_request_header_for_app(app, buffer + header_start, header_end - header_start, &request) != 0) {
+        uint64_t parse_start = debug_timing_start(metrics);
+        int parse_result = parse_request_header_for_app(app,
+                                                        buffer + header_start,
+                                                        header_end - header_start,
+                                                        &request);
+        if (debug_timing_enabled(metrics) && parse_start != 0) {
+            metrics_observe_timing(&metrics->timing_http_parse, metrics_now_ns() - parse_start);
+        }
+        if (parse_result != 0) {
             if (metrics != NULL) {
                 metrics_inc(&metrics->malformed_requests);
             }
@@ -1081,8 +1192,13 @@ static int raw_http_handle_connection_loop(int client_fd, const raw_http_app *ap
             write_status = write_all(client_fd, response->data, response->len, metrics);
         }
         if (metrics != NULL) {
-            metrics_observe(&metrics->write_response, metrics_now_ns() - write_start);
-            metrics_observe(&metrics->request_total, metrics_now_ns() - request_start);
+            uint64_t now = metrics_now_ns();
+            uint64_t write_elapsed = now - write_start;
+            metrics_observe(&metrics->write_response, write_elapsed);
+            if (debug_timing_enabled(metrics)) {
+                metrics_observe_timing(&metrics->timing_write_response, write_elapsed);
+            }
+            metrics_observe(&metrics->request_total, now - request_start);
         }
         if (write_status != 0) {
             return -1;
@@ -1221,7 +1337,11 @@ static uint32_t raw_http_conn_flush(raw_http_conn *conn) {
     if (conn->out_data != NULL) {
         if (metrics != NULL) {
             uint64_t now = metrics_now_ns();
-            metrics_observe(&metrics->write_response, now - conn->write_start_ns);
+            uint64_t write_elapsed = now - conn->write_start_ns;
+            metrics_observe(&metrics->write_response, write_elapsed);
+            if (debug_timing_enabled(metrics)) {
+                metrics_observe_timing(&metrics->timing_write_response, write_elapsed);
+            }
             metrics_observe(&metrics->request_total, now - conn->request_start_ns);
             if (conn->request_complete_ns != 0 && now >= conn->request_complete_ns) {
                 metrics_observe(&metrics->request_complete_to_response_done, now - conn->request_complete_ns);
@@ -1297,7 +1417,15 @@ static uint32_t raw_http_conn_process_buffer(raw_http_conn *conn) {
         size_t header_end = conn->pos + (size_t)relative_header_end;
         uint64_t header_complete_ns = metrics != NULL ? metrics_now_ns() : 0u;
         parsed_request request;
-        if (parse_request_header_for_app(conn->app, conn->buffer + header_start, header_end - header_start, &request) != 0) {
+        uint64_t parse_start = debug_timing_start(metrics);
+        int parse_result = parse_request_header_for_app(conn->app,
+                                                        conn->buffer + header_start,
+                                                        header_end - header_start,
+                                                        &request);
+        if (debug_timing_enabled(metrics) && parse_start != 0) {
+            metrics_observe_timing(&metrics->timing_http_parse, metrics_now_ns() - parse_start);
+        }
+        if (parse_result != 0) {
             if (metrics != NULL) {
                 metrics_inc(&metrics->malformed_requests);
                 metrics_inc(&metrics->epoll_parser_errors);
@@ -1549,6 +1677,53 @@ static int create_tcp_listener(const char *addr, bool nonblocking) {
     return server_fd;
 }
 
+static int create_unix_listener(const char *path, bool nonblocking) {
+    if (path == NULL || path[0] == '\0') {
+        errno = EINVAL;
+        return -1;
+    }
+    if (strlen(path) >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    if (mkdir_parent_for_unix_socket(path) != 0) {
+        return -1;
+    }
+
+    int server_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (server_fd < 0) {
+        return -1;
+    }
+    if (nonblocking) {
+        int flags = fcntl(server_fd, F_GETFL, 0);
+        if (flags >= 0) {
+            (void)fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);
+        }
+    }
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    memcpy(addr.sun_path, path, strlen(path) + 1U);
+
+    (void)unlink(path);
+    if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        int saved_errno = errno;
+        close(server_fd);
+        errno = saved_errno;
+        return -1;
+    }
+    (void)chmod(path, 0666);
+    if (listen(server_fd, RINHA_LISTEN_BACKLOG) < 0) {
+        int saved_errno = errno;
+        close(server_fd);
+        (void)unlink(path);
+        errno = saved_errno;
+        return -1;
+    }
+    return server_fd;
+}
+
 int raw_http_serve(const char *addr, const raw_http_app *app) {
     int server_fd = create_tcp_listener(addr, false);
     if (server_fd < 0) {
@@ -1571,6 +1746,44 @@ int raw_http_serve(const char *addr, const raw_http_app *app) {
             metrics_inc(&metrics->tcp_accept_count);
         }
         tune_tcp_fd(client_fd, false);
+
+        connection_arg *arg = (connection_arg *)malloc(sizeof(*arg));
+        if (arg == NULL) {
+            close(client_fd);
+            continue;
+        }
+        arg->client_fd = client_fd;
+        arg->app = app;
+        pthread_t thread;
+        if (pthread_create(&thread, NULL, connection_thread, arg) != 0) {
+            free(arg);
+            close(client_fd);
+            continue;
+        }
+        (void)pthread_detach(thread);
+    }
+}
+
+int raw_http_serve_unix(const char *path, const raw_http_app *app) {
+    int server_fd = create_unix_listener(path, false);
+    if (server_fd < 0) {
+        return -1;
+    }
+
+    for (;;) {
+        int client_fd = accept(server_fd, NULL, NULL);
+        if (client_fd < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            close(server_fd);
+            return -1;
+        }
+
+        RinhaMetrics *metrics = app_metrics(app);
+        if (metrics != NULL) {
+            metrics_inc(&metrics->accepted_connections);
+        }
 
         connection_arg *arg = (connection_arg *)malloc(sizeof(*arg));
         if (arg == NULL) {
@@ -1723,12 +1936,7 @@ static void raw_epoll_accept_ready(int epoll_fd, int server_fd, const raw_http_a
     }
 }
 
-int raw_http_serve_epoll(const char *addr, const raw_http_app *app) {
-    int server_fd = create_tcp_listener(addr, true);
-    if (server_fd < 0) {
-        return -1;
-    }
-
+static int raw_http_serve_epoll_fd(int server_fd, const raw_http_app *app) {
     int epoll_fd = epoll_create1(EPOLL_CLOEXEC);
     if (epoll_fd < 0) {
         close(server_fd);
@@ -1844,4 +2052,20 @@ int raw_http_serve_epoll(const char *addr, const raw_http_app *app) {
             }
         }
     }
+}
+
+int raw_http_serve_epoll(const char *addr, const raw_http_app *app) {
+    int server_fd = create_tcp_listener(addr, true);
+    if (server_fd < 0) {
+        return -1;
+    }
+    return raw_http_serve_epoll_fd(server_fd, app);
+}
+
+int raw_http_serve_unix_epoll(const char *path, const raw_http_app *app) {
+    int server_fd = create_unix_listener(path, true);
+    if (server_fd < 0) {
+        return -1;
+    }
+    return raw_http_serve_epoll_fd(server_fd, app);
 }

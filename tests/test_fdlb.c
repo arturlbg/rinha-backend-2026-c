@@ -66,6 +66,13 @@ static void test_parse_upstreams(void) {
     char bad[] = "/sockets/a.ctrl,,/sockets/b.ctrl";
     count = 0;
     assert(fdlb_parse_upstreams(bad, paths, 4, &count) != 0);
+
+    char proxy[] = "/sockets/api1.sock,/sockets/api2.sock";
+    count = 0;
+    assert(fdlb_parse_upstreams(proxy, paths, 4, &count) == 0);
+    assert(count == 2);
+    assert(strcmp(paths[0], "/sockets/api1.sock") == 0);
+    assert(strcmp(paths[1], "/sockets/api2.sock") == 0);
 }
 
 static void test_round_robin(void) {
@@ -74,6 +81,17 @@ static void test_round_robin(void) {
     assert(fdlb_round_robin_next(&cursor, 2) == 1);
     assert(fdlb_round_robin_next(&cursor, 2) == 0);
     assert(cursor == 1);
+}
+
+static void test_mode_parse(void) {
+    FdlbMode mode = FDLB_MODE_PROXY;
+    assert(fdlb_parse_mode(NULL, &mode));
+    assert(mode == FDLB_MODE_FDPASS);
+    assert(fdlb_parse_mode("fdpass", &mode));
+    assert(mode == FDLB_MODE_FDPASS);
+    assert(fdlb_parse_mode("proxy", &mode));
+    assert(mode == FDLB_MODE_PROXY);
+    assert(!fdlb_parse_mode("http", &mode));
 }
 
 static void test_strategy_parse(void) {
@@ -137,6 +155,7 @@ static void test_send_fd(void) {
 int main(void) {
     test_parse_upstreams();
     test_round_robin();
+    test_mode_parse();
     test_strategy_parse();
     test_strategy_select();
     test_feedback_decrement();

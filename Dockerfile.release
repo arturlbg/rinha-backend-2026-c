@@ -4,6 +4,7 @@ FROM --platform=$BUILDPLATFORM gcc:13-bookworm AS build
 WORKDIR /src
 ARG CFLAGS_PROFILE=pre10b
 ARG RINHA_ENABLE_METRICS=0
+ARG RINHA_RELEASE_INDEX=kdprimary2
 
 COPY Makefile ./
 COPY include ./include
@@ -13,18 +14,40 @@ RUN make clean && make all CFLAGS_PROFILE=${CFLAGS_PROFILE} RINHA_ENABLE_METRICS
 
 FROM debian:bookworm-slim AS runtime
 WORKDIR /app
+ARG RINHA_RELEASE_INDEX=kdprimary2
+ARG RINHA_KEEP_BOTH_INDEXES=0
 
 COPY --from=build /src/build/rinha-api /app/rinha-api
-COPY release/kdprimary2.bin /app/resources/kdprimary2.bin
+COPY release/ /app/resources/
+
+RUN case "$RINHA_RELEASE_INDEX" in \
+        kdprimary2) test -f /app/resources/kdprimary2.bin ;; \
+        kdclass3) test -f /app/resources/kdclass3.bin ;; \
+        *) echo "invalid RINHA_RELEASE_INDEX=$RINHA_RELEASE_INDEX" >&2; exit 1 ;; \
+    esac && \
+    case "$RINHA_KEEP_BOTH_INDEXES" in \
+        0|false|FALSE) \
+            case "$RINHA_RELEASE_INDEX" in \
+                kdprimary2) rm -f /app/resources/kdclass3.bin ;; \
+                kdclass3) rm -f /app/resources/kdprimary2.bin ;; \
+            esac ;; \
+        1|true|TRUE) \
+            test -f /app/resources/kdprimary2.bin && test -f /app/resources/kdclass3.bin ;; \
+        *) echo "invalid RINHA_KEEP_BOTH_INDEXES=$RINHA_KEEP_BOTH_INDEXES" >&2; exit 1 ;; \
+    esac
 
 ENV RINHA_ADDR=:8080
 ENV RINHA_LISTEN_MODE=fdpass
-ENV RINHA_SEARCH_IMPL=kdprimary2
+ENV RINHA_SEARCH_IMPL=${RINHA_RELEASE_INDEX}
 ENV RINHA_KDPRIMARY2_PATH=/app/resources/kdprimary2.bin
 ENV RINHA_KDPRIMARY2_TOUCH=true
+ENV RINHA_KDCLASS3_PATH=/app/resources/kdclass3.bin
+ENV RINHA_KDCLASS3_TOUCH=true
+ENV RINHA_KDCLASS3_FALLBACK=none
 ENV RINHA_EXEC_MODE=epoll
 ENV RINHA_API_PROCESSES=1
 ENV RINHA_METRICS_ENABLED=false
+ENV RINHA_DEBUG_TIMING=false
 
 EXPOSE 8080
 ENTRYPOINT ["/app/rinha-api"]
