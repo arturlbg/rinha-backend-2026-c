@@ -1,56 +1,85 @@
 services:
-  nginx:
-    image: nginx:1.25-alpine
+  lb:
+    image: ghcr.io/arturlbg/rinha-backend-2026-c:fdlb
     platform: linux/amd64
     ports:
       - "9999:9999"
+    environment:
+      RINHA_LB_ADDR: ":9999"
+      RINHA_FDPASS_UPSTREAMS: "/sockets/api1.ctrl,/sockets/api2.ctrl"
     volumes:
-      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - sockets:/sockets
     depends_on:
-      - api1
-      - api2
-    cpus: "0.10"
-    mem_limit: 16m
+      api1:
+        condition: service_healthy
+      api2:
+        condition: service_healthy
+    cpus: "0.16"
+    mem_limit: "30m"
     networks:
       - rinha
 
   api1:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: rinha-c-phase6:local
+    image: ghcr.io/arturlbg/rinha-backend-2026-c:kdclass3-l64
     platform: linux/amd64
+    user: "0:0"
     environment:
       RINHA_ADDR: ":8080"
-      RINHA_INDEX_PATH: "/app/resources/index.bin"
-      RINHA_IVF8_MAX_CANDIDATES: "4096"
-      RINHA_IVF8_PROBES: "8"
+      RINHA_SEARCH_IMPL: "kdclass3"
+      RINHA_KDCLASS3_PATH: "/app/resources/kdclass3.bin"
+      RINHA_KDCLASS3_TOUCH: "true"
+      RINHA_KDCLASS3_FALLBACK: "none"
+      RINHA_LISTEN_MODE: "fdpass"
+      RINHA_EXEC_MODE: "epoll"
+      RINHA_API_PROCESS_MODE: "sync"
+      RINHA_API_PROCESSES: "1"
+      RINHA_METRICS_ENABLED: "false"
+      RINHA_UNIX_SOCKET: "/sockets/api1.ctrl"
     volumes:
-      - ../rinha-2026-go/release:/app/resources:ro
-    cpus: "0.45"
-    mem_limit: 167m
+      - sockets:/sockets
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /sockets/api1.ctrl"]
+      interval: 1s
+      timeout: 1s
+      retries: 60
+      start_period: 1s
+    cpus: "0.42"
+    mem_limit: "160m"
     networks:
       - rinha
 
   api2:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: rinha-c-phase6:local
+    image: ghcr.io/arturlbg/rinha-backend-2026-c:kdclass3-l64
     platform: linux/amd64
+    user: "0:0"
     environment:
       RINHA_ADDR: ":8080"
-      RINHA_INDEX_PATH: "/app/resources/index.bin"
-      RINHA_IVF8_MAX_CANDIDATES: "4096"
-      RINHA_IVF8_PROBES: "8"
+      RINHA_SEARCH_IMPL: "kdclass3"
+      RINHA_KDCLASS3_PATH: "/app/resources/kdclass3.bin"
+      RINHA_KDCLASS3_TOUCH: "true"
+      RINHA_KDCLASS3_FALLBACK: "none"
+      RINHA_LISTEN_MODE: "fdpass"
+      RINHA_EXEC_MODE: "epoll"
+      RINHA_API_PROCESS_MODE: "sync"
+      RINHA_API_PROCESSES: "1"
+      RINHA_METRICS_ENABLED: "false"
+      RINHA_UNIX_SOCKET: "/sockets/api2.ctrl"
     volumes:
-      - ../rinha-2026-go/release:/app/resources:ro
-    cpus: "0.45"
-    mem_limit: 167m
+      - sockets:/sockets
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /sockets/api2.ctrl"]
+      interval: 1s
+      timeout: 1s
+      retries: 60
+      start_period: 1s
+    cpus: "0.42"
+    mem_limit: "160m"
     networks:
       - rinha
+
+volumes:
+  sockets:
 
 networks:
   rinha:
     driver: bridge
-
