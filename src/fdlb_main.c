@@ -50,6 +50,11 @@ int main(void) {
             "/sockets/api1.ctrl,/sockets/api2.ctrl";
     }
 
+    const char *backlog = getenv("RINHA_FDLB_BACKLOG");
+    if (backlog == NULL || *backlog == '\0') {
+        backlog = getenv("RINHA_FDLB_LISTEN_BACKLOG");
+    }
+
     FdlbConfig config = {
         .listen_addr = listen_addr,
         .upstreams = upstreams,
@@ -61,7 +66,8 @@ int main(void) {
         .tcp_defer_accept = env_bool("RINHA_FDLB_TCP_DEFER_ACCEPT", false),
         .tcp_fastopen = env_bool("RINHA_FDLB_TCP_FASTOPEN", false),
         .so_busy_poll_us = env_u32("RINHA_FDLB_SO_BUSY_POLL_US", 0U),
-        .listen_backlog = env_u32("RINHA_FDLB_LISTEN_BACKLOG", 4096U),
+        .listen_backlog = fdlb_parse_u32_clamped(backlog, 4096U, 1U, 65535U),
+        .accept_batch = fdlb_parse_u32_clamped(getenv("RINHA_FDLB_ACCEPT_BATCH"), 1U, 1U, 256U),
         .connect_retry_ms = env_u32("RINHA_LB_CONNECT_RETRY_MS", 25U),
         .startup_timeout_ms = env_u32("RINHA_LB_STARTUP_TIMEOUT_MS", 10000U),
     };

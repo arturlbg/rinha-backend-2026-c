@@ -17,6 +17,7 @@ typedef struct {
     bool tcp_fastopen;
     uint32_t so_busy_poll_us;
     uint32_t listen_backlog;
+    uint32_t accept_batch;
     uint32_t connect_retry_ms;
     uint32_t startup_timeout_ms;
 } FdlbConfig;
@@ -33,6 +34,7 @@ typedef enum {
 } FdlbStrategy;
 
 int fdlb_parse_upstreams(char *text, char **paths, size_t max_paths, size_t *count);
+uint32_t fdlb_parse_u32_clamped(const char *text, uint32_t fallback, uint32_t minimum, uint32_t maximum);
 bool fdlb_parse_mode(const char *text, FdlbMode *mode);
 bool fdlb_parse_strategy(const char *text, FdlbStrategy *strategy);
 size_t fdlb_round_robin_next(size_t *cursor, size_t count);

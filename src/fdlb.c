@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <signal.h>
 #include <stdio.h>
@@ -23,6 +24,7 @@
 #define FDLB_MAX_UPSTREAMS 16
 #define FDLB_UPSTREAMS_BUFFER_SIZE 2048
 #define FDLB_DEFAULT_LISTEN_BACKLOG 4096U
+#define FDLB_DEFAULT_ACCEPT_BATCH 1U
 #define FDLB_FEEDBACK_BYTE 'C'
 #define FDLB_METRICS_INTERVAL 100ULL
 #define FDLB_PROXY_BUFFER_SIZE 16384U
@@ -155,6 +157,34 @@ int fdlb_parse_upstreams(char *text, char **paths, size_t max_paths, size_t *cou
 
     *count = n;
     return 0;
+}
+
+uint32_t fdlb_parse_u32_clamped(const char *text, uint32_t fallback, uint32_t minimum, uint32_t maximum) {
+    if (minimum > maximum) {
+        return fallback;
+    }
+    if (fallback < minimum) {
+        fallback = minimum;
+    } else if (fallback > maximum) {
+        fallback = maximum;
+    }
+    if (text == NULL || *text == '\0') {
+        return fallback;
+    }
+
+    char *end = NULL;
+    errno = 0;
+    unsigned long parsed = strtoul(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0') {
+        return fallback;
+    }
+    if (parsed < minimum) {
+        return minimum;
+    }
+    if (parsed > maximum) {
+        return maximum;
+    }
+    return (uint32_t)parsed;
 }
 
 bool fdlb_parse_mode(const char *text, FdlbMode *mode) {
@@ -406,8 +436,12 @@ static void apply_optional_socket_tuning(int fd, const FdlbConfig *config) {
         (void)setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &enabled, sizeof(enabled));
     }
     if (config->tcp_fastopen) {
-        int backlog = config->listen_backlog == 0U ?
-            (int)FDLB_DEFAULT_LISTEN_BACKLOG : (int)config->listen_backlog;
+        int backlog = (int)fdlb_parse_u32_clamped(NULL,
+                                                   config->listen_backlog == 0U ?
+                                                       FDLB_DEFAULT_LISTEN_BACKLOG :
+                                                       config->listen_backlog,
+                                                   1U,
+                                                   65535U);
         (void)setsockopt(fd, IPPROTO_TCP, TCP_FASTOPEN, &backlog, sizeof(backlog));
     }
     if (config->so_busy_poll_us > 0U) {
@@ -446,8 +480,12 @@ static int open_listen_socket(const FdlbConfig *config) {
         return -1;
     }
 
-    uint32_t backlog = config == NULL || config->listen_backlog == 0U ?
-        FDLB_DEFAULT_LISTEN_BACKLOG : config->listen_backlog;
+    uint32_t backlog = fdlb_parse_u32_clamped(NULL,
+                                               config == NULL || config->listen_backlog == 0U ?
+                                                   FDLB_DEFAULT_LISTEN_BACKLOG :
+                                                   config->listen_backlog,
+                                               1U,
+                                               65535U);
     if (listen(fd, (int)backlog) != 0) {
         int saved_errno = errno;
         close(fd);
@@ -611,6 +649,30 @@ static bool deliver_fd(FdlbUpstream *upstreams,
     return false;
 }
 
+static void handle_fdpass_client(FdlbUpstream *upstreams,
+                                 size_t upstream_count,
+                                 size_t *cursor,
+                                 FdlbStrategy strategy,
+                                 int client_fd,
+                                 uint32_t retry_ms,
+                                 FdlbMetrics *metrics) {
+    if (metrics != NULL && metrics->enabled) {
+        metrics->accepted++;
+    }
+    if (!deliver_fd(upstreams,
+                    upstream_count,
+                    cursor,
+                    strategy,
+                    client_fd,
+                    retry_ms,
+                    metrics)) {
+        if (metrics != NULL && metrics->enabled) {
+            metrics->dropped++;
+        }
+    }
+    close(client_fd);
+}
+
 static void print_metrics(const FdlbMetrics *metrics,
                           const FdlbUpstream *upstreams,
                           size_t upstream_count,
@@ -764,6 +826,31 @@ static int accept_client_nonblocking(int listen_fd) {
             return fd;
         }
         if (errno == EINTR) {
+            continue;
+        }
+        return -1;
+    }
+}
+
+static int wait_for_listener(int listen_fd) {
+    struct pollfd pfd = {
+        .fd = listen_fd,
+        .events = POLLIN,
+        .revents = 0,
+    };
+    for (;;) {
+        int ready = poll(&pfd, 1, -1);
+        if (ready > 0) {
+            if ((pfd.revents & POLLIN) != 0) {
+                return 0;
+            }
+            errno = ECONNABORTED;
+            return -1;
+        }
+        if (ready < 0 && errno == EINTR) {
+            if (fdlb_stop_requested) {
+                return -1;
+            }
             continue;
         }
         return -1;
@@ -1250,51 +1337,93 @@ int fdlb_run(const FdlbConfig *config) {
         return 1;
     }
 
+    uint32_t accept_batch = fdlb_parse_u32_clamped(NULL,
+                                                    config->accept_batch == 0U ?
+                                                        FDLB_DEFAULT_ACCEPT_BATCH :
+                                                        config->accept_batch,
+                                                    1U,
+                                                    256U);
+    if (accept_batch > 1U && set_nonblocking_fd(listen_fd) != 0) {
+        perror("nonblocking listen");
+        close(listen_fd);
+        for (size_t i = 0; i < upstream_count; i++) {
+            close(upstreams[i].fd);
+        }
+        return 1;
+    }
+
     fprintf(stderr,
-            "fdlb listening on %s with %zu upstreams strategy=%u backlog=%u defer_accept=%u fastopen=%u busy_poll_us=%u reuseport=%u\n",
+            "fdlb listening on %s with %zu upstreams strategy=%u backlog=%u accept_batch=%u defer_accept=%u fastopen=%u busy_poll_us=%u reuseport=%u\n",
             config->listen_addr,
             upstream_count,
             (unsigned)strategy,
-            config->listen_backlog == 0U ? FDLB_DEFAULT_LISTEN_BACKLOG : config->listen_backlog,
+            fdlb_parse_u32_clamped(NULL,
+                                   config->listen_backlog == 0U ?
+                                       FDLB_DEFAULT_LISTEN_BACKLOG :
+                                       config->listen_backlog,
+                                   1U,
+                                   65535U),
+            accept_batch,
             config->tcp_defer_accept ? 1U : 0U,
             config->tcp_fastopen ? 1U : 0U,
             config->so_busy_poll_us,
             config->reuseport ? 1U : 0U);
 
     size_t cursor = 0;
+    uint32_t retry_ms = config->connect_retry_ms == 0U ? 25U : config->connect_retry_ms;
     for (; !fdlb_stop_requested;) {
         poll_all_feedback(upstreams, upstream_count);
-        int client_fd = accept_client(listen_fd);
-        if (client_fd < 0) {
+        if (accept_batch == 1U) {
+            int client_fd = accept_client(listen_fd);
+            if (client_fd < 0) {
+                if (fdlb_stop_requested) {
+                    break;
+                }
+                if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM) {
+                    sleep_ms(1);
+                }
+                continue;
+            }
+            handle_fdpass_client(upstreams,
+                                 upstream_count,
+                                 &cursor,
+                                 strategy,
+                                 client_fd,
+                                 retry_ms,
+                                 &metrics);
+            if (metrics.enabled && metrics.accepted % FDLB_METRICS_INTERVAL == 0ULL) {
+                print_metrics(&metrics, upstreams, upstream_count, strategy);
+            }
+            continue;
+        }
+
+        if (wait_for_listener(listen_fd) != 0) {
             if (fdlb_stop_requested) {
                 break;
             }
-            if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM) {
-                sleep_ms(1);
-                continue;
-            }
             continue;
         }
-        if (metrics.enabled) {
-            metrics.accepted++;
-        }
-
-        if (!deliver_fd(upstreams,
-                        upstream_count,
-                        &cursor,
-                        strategy,
-                        client_fd,
-                        config->connect_retry_ms == 0U ? 25U : config->connect_retry_ms,
-                        &metrics)) {
-            if (metrics.enabled) {
-                metrics.dropped++;
+        for (uint32_t accepted = 0U; accepted < accept_batch; accepted++) {
+            int client_fd = accept_client_nonblocking(listen_fd);
+            if (client_fd < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    break;
+                }
+                if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM) {
+                    sleep_ms(1);
+                }
+                break;
             }
-            close(client_fd);
-            continue;
-        }
-        close(client_fd);
-        if (metrics.enabled && metrics.accepted % FDLB_METRICS_INTERVAL == 0ULL) {
-            print_metrics(&metrics, upstreams, upstream_count, strategy);
+            handle_fdpass_client(upstreams,
+                                 upstream_count,
+                                 &cursor,
+                                 strategy,
+                                 client_fd,
+                                 retry_ms,
+                                 &metrics);
+            if (metrics.enabled && metrics.accepted % FDLB_METRICS_INTERVAL == 0ULL) {
+                print_metrics(&metrics, upstreams, upstream_count, strategy);
+            }
         }
     }
     poll_all_feedback(upstreams, upstream_count);

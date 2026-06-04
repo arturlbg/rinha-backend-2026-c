@@ -83,6 +83,19 @@ static void test_round_robin(void) {
     assert(cursor == 1);
 }
 
+static void test_u32_clamped_parse(void) {
+    assert(fdlb_parse_u32_clamped(NULL, 4096, 1, 65535) == 4096);
+    assert(fdlb_parse_u32_clamped("", 1, 1, 256) == 1);
+    assert(fdlb_parse_u32_clamped("65535", 4096, 1, 65535) == 65535);
+    assert(fdlb_parse_u32_clamped("64", 1, 1, 256) == 64);
+    assert(fdlb_parse_u32_clamped("0", 4096, 1, 65535) == 1);
+    assert(fdlb_parse_u32_clamped("999999", 1, 1, 256) == 256);
+    assert(fdlb_parse_u32_clamped("bogus", 4096, 1, 65535) == 4096);
+    assert(fdlb_parse_u32_clamped("-1", 1, 1, 256) == 256);
+    assert(fdlb_parse_u32_clamped(NULL, 0, 1, 256) == 1);
+    assert(fdlb_parse_u32_clamped(NULL, 999999, 1, 65535) == 65535);
+}
+
 static void test_mode_parse(void) {
     FdlbMode mode = FDLB_MODE_PROXY;
     assert(fdlb_parse_mode(NULL, &mode));
@@ -155,6 +168,7 @@ static void test_send_fd(void) {
 int main(void) {
     test_parse_upstreams();
     test_round_robin();
+    test_u32_clamped_parse();
     test_mode_parse();
     test_strategy_parse();
     test_strategy_select();
