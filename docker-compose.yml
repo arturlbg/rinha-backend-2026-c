@@ -1,6 +1,6 @@
 services:
   lb:
-    image: ghcr.io/arturlbg/rinha-backend-2026-c:fdlb-workers2
+    image: ghcr.io/arturlbg/rinha-backend-2026-c:fdlb
     platform: linux/amd64
     ports:
       - "9999:9999"
@@ -8,8 +8,7 @@ services:
       RINHA_LB_ADDR: ":9999"
       RINHA_FDPASS_UPSTREAMS: "/sockets/api1.ctrl,/sockets/api2.ctrl"
       RINHA_FDLB_LEAN: "true"
-      RINHA_FDLB_ACCEPT_BATCH: "16"
-      RINHA_FDLB_WORKERS: "2"
+      RINHA_FDLB_ACCEPT_BATCH: "48"
     volumes:
       - sockets:/sockets
     depends_on:
