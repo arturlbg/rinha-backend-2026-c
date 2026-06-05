@@ -281,3 +281,22 @@ Preview compose updated:
 ### Working Validation
 
 All unit tests pass. kdclass3 baseline and SIMD both exact (0/0/0 errors, 0 mismatches vs kdprimary2). Release images build for all configurations.
+
+## Phase 24: Official Result (commit edff294)
+
+**First official run with Phase 22 fdlb improvements:**
+
+| Metric | Phase 24 | Previous Checkpoint | Delta |
+|--------|----------|---------------------|-------|
+| p99 | 1.649ms | ~1.82ms | **-171us (-9.4%)** |
+| p99_score | 2782.86 | ~2740 | +42.86 |
+| final_score | 5782.86 | ~5740.81 | **+42.05** |
+| detection_score | 3000 | 3000 | — |
+| FP/FN/Error | 0/0/0 | 0/0/0 | — |
+| HTTP errors | 0 | 0 | — |
+
+**What was active:** Non-blocking sendmsg, EAGAIN fallback, lean LB mode, ACCEPT_BATCH=16, kdclass3 baseline (SIMD opt-in only).
+
+**Score formula:** Each -100us p99 improvement yields ~+27-30 points. To reach 6000 would require p99 = 1.0ms. More realistically, each ~50us reduction is worth ~13-15 points.
+
+**Interpretation:** Phase 22 direction confirmed — LB queuing optimization is the right layer. But the gain (-171us) suggests the LB at 0.16 CPU may still be the bottleneck. With 900 rps, the LB performs accept + sendmsg + round-robin selection. Under cgroup CPU throttling, even these lightweight operations can queue when the quota is exhausted, creating backlog queuing that propagates to p99.

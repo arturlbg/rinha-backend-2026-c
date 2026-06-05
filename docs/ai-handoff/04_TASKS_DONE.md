@@ -360,3 +360,18 @@ Every new search/runtime candidate must pass in this order:
 - Committed handoff docs as `c1466a8 update ai handoff documentation` (11 files, 2227+ insertions).
 - Worktree is clean — 3 commits ahead of origin/main, zero dirty/untracked files.
 - Created `scripts/phase23-native-linux-matrix.sh` — automated 7-variant × 3-repetition k6 test harness for native Linux.
+
+### Phase 24: Official Submission Candidate (commit edff294)
+
+- Submitted root compose with GHCR images, kdclass3 baseline, SIMD opt-in.
+- Active: MSG_DONTWAIT, EAGAIN fallback, lean LB mode, ACCEPT_BATCH=16.
+- Resource split: LB 0.16 CPU / 30MB, APIs 0.42 CPU / 160MB each.
+- **Official result:** p99 1.649ms (-171us, -9.4%), score 5782.86 (+42), 0/0/0 errors, 0 HTTP errors.
+- Direction confirmed: LB queuing optimization is the right layer.
+
+### Phase 25: LB CPU Reallocation Candidate (in progress)
+
+- Hypothesis: LB at 0.16 CPU may be throttled under 900 rps burst.
+- Increased LB CPU from 0.16 to 0.25 (+56%), reduced APIs from 0.42 to 0.375 each (-10.7%).
+- Total: 1.00 CPU / 350MB preserved.
+- kdclass3 baseline, SIMD opt-in, Phase 22 fdlb improvements retained.
