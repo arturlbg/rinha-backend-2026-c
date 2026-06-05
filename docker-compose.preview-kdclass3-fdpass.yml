@@ -7,6 +7,8 @@ services:
     environment:
       RINHA_LB_ADDR: ":9999"
       RINHA_FDPASS_UPSTREAMS: "/sockets/api1.ctrl,/sockets/api2.ctrl"
+      RINHA_FDLB_LEAN: "true"
+      RINHA_FDLB_ACCEPT_BATCH: "64"
     volumes:
       - sockets:/sockets
     depends_on:

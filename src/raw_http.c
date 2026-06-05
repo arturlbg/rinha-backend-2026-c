@@ -3,6 +3,7 @@
 #include "raw_http.h"
 
 #include "config.h"
+#include "epoll_tuning.h"
 #include "fastvector.h"
 #include "responses.h"
 
@@ -511,7 +512,10 @@ static const http_response *search_response_for_query(const raw_http_app *app,
             metrics_note_kdprimary2_search(metrics, &result, metrics_now_ns() - start);
         }
     } else if (app->search_mode == RAW_HTTP_SEARCH_KDCLASS3) {
-        KdClass3SearchResult result = kdclass3_search(app->kdclass3, query);
+        KdClass3SearchResult result =
+            app->kdclass3_impl == KDCLASS3_IMPL_SIMD_FULL
+                ? kdclass3_search_simd_full(app->kdclass3, query)
+                : kdclass3_search(app->kdclass3, query);
         if (metrics != NULL) {
             metrics_inc(&metrics->kdclass3_search_count);
         }
@@ -1975,8 +1979,17 @@ static int raw_http_serve_epoll_fd(int server_fd, const raw_http_app *app) {
     }
 
     struct epoll_event events[128];
+    RinhaEpollPollState poll_state;
+    rinha_epoll_poll_state_init(&poll_state, app == NULL ? NULL : &app->epoll_tuning);
     for (;;) {
-        int n = epoll_wait(epoll_fd, events, (int)(sizeof(events) / sizeof(events[0])), -1);
+        int n = rinha_epoll_wait_tuned(epoll_fd,
+                                       events,
+                                       (int)(sizeof(events) / sizeof(events[0])),
+                                       app == NULL ? NULL : &app->epoll_tuning,
+                                       &poll_state);
+        rinha_epoll_after_wait(&poll_state,
+                               app == NULL ? NULL : &app->epoll_tuning,
+                               n);
         if (n < 0) {
             if (errno == EINTR) {
                 continue;

@@ -1,4 +1,4 @@
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE
 
 #include "kdclass3.h"
 
@@ -68,6 +68,105 @@ static void set_error(char *err, size_t err_len, const char *message) {
 static void set_errno_error(char *err, size_t err_len, const char *prefix) {
     if (err != NULL && err_len > 0) {
         (void)snprintf(err, err_len, "%s: %s", prefix, strerror(errno));
+    }
+}
+
+KdClass3OpenOptions kdclass3_open_options_default(void) {
+    KdClass3OpenOptions options = {
+        .populate = false,
+        .mlock = false,
+        .madvise_mode = KDCLASS3_MADVISE_OFF,
+    };
+    return options;
+}
+
+bool kdclass3_madvise_mode_from_string(const char *value, KdClass3MadviseMode *mode) {
+    if (mode == NULL) {
+        return false;
+    }
+    if (value == NULL || value[0] == '\0' || strcmp(value, "off") == 0) {
+        *mode = KDCLASS3_MADVISE_OFF;
+        return true;
+    }
+    if (strcmp(value, "willneed") == 0) {
+        *mode = KDCLASS3_MADVISE_WILLNEED;
+        return true;
+    }
+    if (strcmp(value, "random") == 0) {
+        *mode = KDCLASS3_MADVISE_RANDOM;
+        return true;
+    }
+    if (strcmp(value, "sequential") == 0) {
+        *mode = KDCLASS3_MADVISE_SEQUENTIAL;
+        return true;
+    }
+    if (strcmp(value, "hugepage") == 0) {
+        *mode = KDCLASS3_MADVISE_HUGEPAGE;
+        return true;
+    }
+    if (strcmp(value, "nohugepage") == 0) {
+        *mode = KDCLASS3_MADVISE_NOHUGEPAGE;
+        return true;
+    }
+    return false;
+}
+
+const char *kdclass3_madvise_mode_name(KdClass3MadviseMode mode) {
+    switch (mode) {
+        case KDCLASS3_MADVISE_OFF:
+            return "off";
+        case KDCLASS3_MADVISE_WILLNEED:
+            return "willneed";
+        case KDCLASS3_MADVISE_RANDOM:
+            return "random";
+        case KDCLASS3_MADVISE_SEQUENTIAL:
+            return "sequential";
+        case KDCLASS3_MADVISE_HUGEPAGE:
+            return "hugepage";
+        case KDCLASS3_MADVISE_NOHUGEPAGE:
+            return "nohugepage";
+        default:
+            return "off";
+    }
+}
+
+bool kdclass3_impl_from_string(const char *value, KdClass3Impl *impl) {
+    if (impl == NULL) {
+        return false;
+    }
+    if (value == NULL || value[0] == '\0' || strcmp(value, "baseline") == 0) {
+        *impl = KDCLASS3_IMPL_BASELINE;
+        return true;
+    }
+    if (strcmp(value, "simd_full") == 0) {
+        *impl = KDCLASS3_IMPL_SIMD_FULL;
+        return true;
+    }
+    return false;
+}
+
+const char *kdclass3_impl_name(KdClass3Impl impl) {
+    return impl == KDCLASS3_IMPL_SIMD_FULL ? "simd_full" : "baseline";
+}
+
+static int kdclass3_madvise_value(KdClass3MadviseMode mode) {
+    switch (mode) {
+        case KDCLASS3_MADVISE_WILLNEED:
+            return MADV_WILLNEED;
+        case KDCLASS3_MADVISE_RANDOM:
+            return MADV_RANDOM;
+        case KDCLASS3_MADVISE_SEQUENTIAL:
+            return MADV_SEQUENTIAL;
+#ifdef MADV_HUGEPAGE
+        case KDCLASS3_MADVISE_HUGEPAGE:
+            return MADV_HUGEPAGE;
+#endif
+#ifdef MADV_NOHUGEPAGE
+        case KDCLASS3_MADVISE_NOHUGEPAGE:
+            return MADV_NOHUGEPAGE;
+#endif
+        default:
+            return -1;
     }
 }
 
@@ -767,7 +866,11 @@ static int validate_header(const KdClass3FileHeader *header, size_t file_size, c
     return 0;
 }
 
-int kdclass3_open(const char *path, KdClass3Index *out, char *err, size_t err_len) {
+int kdclass3_open_with_options(const char *path,
+                               KdClass3Index *out,
+                               const KdClass3OpenOptions *options,
+                               char *err,
+                               size_t err_len) {
     if (path == NULL || out == NULL) {
         set_error(err, err_len, "kdclass3: nil open input");
         return -1;
@@ -790,8 +893,20 @@ int kdclass3_open(const char *path, KdClass3Index *out, char *err, size_t err_le
         return -1;
     }
 
+    KdClass3OpenOptions normalized = options == NULL ? kdclass3_open_options_default() : *options;
     size_t file_size = (size_t)st.st_size;
-    void *map = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    int mmap_flags = MAP_PRIVATE;
+    bool populate_applied = false;
+    int populate_errno = 0;
+    if (normalized.populate) {
+#ifdef MAP_POPULATE
+        mmap_flags |= MAP_POPULATE;
+        populate_applied = true;
+#else
+        populate_errno = ENOTSUP;
+#endif
+    }
+    void *map = mmap(NULL, file_size, PROT_READ, mmap_flags, fd, 0);
     if (map == MAP_FAILED) {
         set_errno_error(err, err_len, "kdclass3: mmap");
         close(fd);
@@ -809,6 +924,28 @@ int kdclass3_open(const char *path, KdClass3Index *out, char *err, size_t err_le
     out->fd = fd;
     out->file_size = file_size;
     out->map = map;
+    out->populate_requested = normalized.populate;
+    out->populate_applied = populate_applied;
+    out->populate_errno = populate_errno;
+    out->madvise_mode = normalized.madvise_mode;
+    if (normalized.madvise_mode != KDCLASS3_MADVISE_OFF) {
+        int advice = kdclass3_madvise_value(normalized.madvise_mode);
+        if (advice < 0) {
+            out->madvise_errno = ENOTSUP;
+        } else if (madvise(map, file_size, advice) == 0) {
+            out->madvise_applied = true;
+        } else {
+            out->madvise_errno = errno;
+        }
+    }
+    out->mlock_requested = normalized.mlock;
+    if (normalized.mlock) {
+        if (mlock(map, file_size) == 0) {
+            out->mlock_applied = true;
+        } else {
+            out->mlock_errno = errno;
+        }
+    }
     out->leaf_size = header->leaf_size;
     out->fraud.count = header->fraud_count;
     out->fraud.node_count = header->fraud_node_count;
@@ -825,11 +962,19 @@ int kdclass3_open(const char *path, KdClass3Index *out, char *err, size_t err_le
     return 0;
 }
 
+int kdclass3_open(const char *path, KdClass3Index *out, char *err, size_t err_len) {
+    KdClass3OpenOptions options = kdclass3_open_options_default();
+    return kdclass3_open_with_options(path, out, &options, err, err_len);
+}
+
 void kdclass3_close(KdClass3Index *index) {
     if (index == NULL) {
         return;
     }
     if (index->map != NULL && index->file_size > 0) {
+        if (index->mlock_applied) {
+            (void)munlock(index->map, index->file_size);
+        }
         (void)munmap(index->map, index->file_size);
     }
     if (index->fd >= 0) {

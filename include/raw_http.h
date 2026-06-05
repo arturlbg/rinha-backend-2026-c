@@ -63,6 +63,7 @@ typedef struct {
     const KdClass3Index *kdclass3;
     const KdTree *kdtree;
     raw_http_search_mode search_mode;
+    KdClass3Impl kdclass3_impl;
     Ivf8SearchConfig search_config;
     bool kdtree_repair_enabled;
     bool kdclass3_fallback_kdprimary2;
@@ -76,6 +77,7 @@ typedef struct {
     bool fast_fraud_parser;
     uint32_t workers;
     uint32_t queue_size;
+    RinhaEpollTuning epoll_tuning;
 } raw_http_app;
 
 struct raw_http_conn {

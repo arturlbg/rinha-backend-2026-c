@@ -3,6 +3,7 @@
 #include "fdpass.h"
 
 #include "config.h"
+#include "epoll_tuning.h"
 #include "fd_queue.h"
 
 #include <errno.h>
@@ -380,9 +381,19 @@ static void *fdpass_epoll_thread(void *arg) {
     RinhaMetrics *metrics = runtime_metrics(runtime);
     raw_http_async_runtime *async = runtime->app == NULL ? NULL : runtime->app->async_runtime;
     struct epoll_event events[128];
+    RinhaEpollPollState poll_state;
+    rinha_epoll_poll_state_init(&poll_state,
+                                runtime->app == NULL ? NULL : &runtime->app->epoll_tuning);
 
     for (;;) {
-        int n = epoll_wait(runtime->epoll_fd, events, (int)(sizeof(events) / sizeof(events[0])), -1);
+        int n = rinha_epoll_wait_tuned(runtime->epoll_fd,
+                                       events,
+                                       (int)(sizeof(events) / sizeof(events[0])),
+                                       runtime->app == NULL ? NULL : &runtime->app->epoll_tuning,
+                                       &poll_state);
+        rinha_epoll_after_wait(&poll_state,
+                               runtime->app == NULL ? NULL : &runtime->app->epoll_tuning,
+                               n);
         if (n < 0) {
             if (errno == EINTR) {
                 continue;

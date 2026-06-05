@@ -302,7 +302,7 @@ int fdlb_send_one_fd(int control_fd, int fd) {
 
     ssize_t n;
     do {
-        n = sendmsg(control_fd, &msg, MSG_NOSIGNAL);
+        n = sendmsg(control_fd, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
     } while (n < 0 && errno == EINTR);
 
     return n == (ssize_t)sizeof(data) ? 0 : -1;
@@ -723,6 +723,10 @@ static bool lean_deliver_fd(FdlbUpstream *upstreams,
 
         if (fdlb_send_one_fd(upstream->fd, client_fd) == 0) {
             return true;
+        }
+
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            continue;
         }
 
         close(upstream->fd);

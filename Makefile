@@ -33,12 +33,13 @@ endif
 BUILD_DIR := build
 TARGET := $(BUILD_DIR)/rinha-api
 FDLB_TARGET := $(BUILD_DIR)/rinha-fdlb
-SOURCES := src/main.c src/raw_http.c src/responses.c src/fastvector.c src/ivf8_index.c src/ivf8_search.c src/kdprimary.c src/kdprimary2.c src/kdclass3.c src/rf_gate_model.c src/kdtree.c src/kdtree_repair.c src/fdpass.c src/fd_queue.c src/metrics.c
+SOURCES := src/main.c src/raw_http.c src/responses.c src/fastvector.c src/ivf8_index.c src/ivf8_search.c src/kdprimary.c src/kdprimary2.c src/kdclass3.c src/kdclass3_simd.c src/rf_gate_model.c src/kdtree.c src/kdtree_repair.c src/fdpass.c src/fd_queue.c src/metrics.c
 FDLB_SOURCES := src/fdlb_main.c src/fdlb.c
 AVX2_OBJECT := $(BUILD_DIR)/src/ivf8_search_avx2.o
-OBJECTS := $(SOURCES:%.c=$(BUILD_DIR)/%.o) $(AVX2_OBJECT)
+KDCLASS3_BBOX_AVX2_OBJECT := $(BUILD_DIR)/src/kdclass3_bbox_avx2.o
+OBJECTS := $(SOURCES:%.c=$(BUILD_DIR)/%.o) $(AVX2_OBJECT) $(KDCLASS3_BBOX_AVX2_OBJECT)
 RAW_HTTP_TEST_TARGET := $(BUILD_DIR)/test_raw_http
-RAW_HTTP_TEST_SOURCES := tests/test_raw_http.c src/raw_http.c src/responses.c src/fastvector.c src/ivf8_search.c src/kdprimary.c src/kdprimary2.c src/kdclass3.c src/rf_gate_model.c src/kdtree.c src/kdtree_repair.c src/metrics.c
+RAW_HTTP_TEST_SOURCES := tests/test_raw_http.c src/raw_http.c src/responses.c src/fastvector.c src/ivf8_search.c src/kdprimary.c src/kdprimary2.c src/kdclass3.c src/kdclass3_simd.c src/rf_gate_model.c src/kdtree.c src/kdtree_repair.c src/metrics.c
 FASTVECTOR_TEST_TARGET := $(BUILD_DIR)/test_fastvector
 FASTVECTOR_TEST_SOURCES := tests/test_fastvector.c src/fastvector.c
 IVF8_INDEX_TEST_TARGET := $(BUILD_DIR)/test_ivf8_index
@@ -46,7 +47,7 @@ IVF8_INDEX_TEST_SOURCES := tests/test_ivf8_index.c src/ivf8_index.c
 IVF8_SEARCH_TEST_TARGET := $(BUILD_DIR)/test_ivf8_search
 IVF8_SEARCH_TEST_SOURCES := tests/test_ivf8_search.c src/ivf8_search.c
 FDPASS_TEST_TARGET := $(BUILD_DIR)/test_fdpass
-FDPASS_TEST_SOURCES := tests/test_fdpass.c src/fdpass.c src/fd_queue.c src/raw_http.c src/responses.c src/fastvector.c src/ivf8_search.c src/kdprimary.c src/kdprimary2.c src/kdclass3.c src/rf_gate_model.c src/kdtree.c src/kdtree_repair.c src/metrics.c
+FDPASS_TEST_SOURCES := tests/test_fdpass.c src/fdpass.c src/fd_queue.c src/raw_http.c src/responses.c src/fastvector.c src/ivf8_search.c src/kdprimary.c src/kdprimary2.c src/kdclass3.c src/kdclass3_simd.c src/rf_gate_model.c src/kdtree.c src/kdtree_repair.c src/metrics.c
 FDLB_TEST_TARGET := $(BUILD_DIR)/test_fdlb
 FDLB_TEST_SOURCES := tests/test_fdlb.c src/fdlb.c
 CONFIG_TEST_TARGET := $(BUILD_DIR)/test_config
@@ -62,7 +63,10 @@ KDPRIMARY_TEST_SOURCES := tests/test_kdprimary.c src/kdprimary.c src/ivf8_search
 KDPRIMARY2_TEST_TARGET := $(BUILD_DIR)/test_kdprimary2
 KDPRIMARY2_TEST_SOURCES := tests/test_kdprimary2.c src/kdprimary2.c src/ivf8_search.c
 KDCLASS3_TEST_TARGET := $(BUILD_DIR)/test_kdclass3
-KDCLASS3_TEST_SOURCES := tests/test_kdclass3.c src/kdclass3.c src/ivf8_search.c
+KDCLASS3_TEST_SOURCES := tests/test_kdclass3.c src/kdclass3.c src/kdclass3_simd.c src/ivf8_search.c
+KDCLASS3_OPT_TEST_TARGET := $(BUILD_DIR)/test_kdclass3_opt
+KDCLASS3_OPT_TEST_SOURCES := tests/test_kdclass3_opt.c src/kdclass3.c src/kdclass3_opt.c src/ivf8_search.c
+KDCLASS3_OPT_AVX2_OBJECT := $(BUILD_DIR)/src/kdclass3_search_avx2.o
 RF_GATE_MODEL_TEST_TARGET := $(BUILD_DIR)/test_rf_gate_model
 RF_GATE_MODEL_TEST_SOURCES := tests/test_rf_gate_model.c src/rf_gate_model.c
 VECTORIZE_C_TARGET := $(BUILD_DIR)/vectorize_c
@@ -100,9 +104,13 @@ BUILD_RF_DATASET_SOURCES := tools/build_rf_dataset.c src/kdclass3.c src/fastvect
 BUILD_KDCLASS3_TARGET := $(BUILD_DIR)/build_kdclass3
 BUILD_KDCLASS3_SOURCES := tools/build_kdclass3.c src/kdclass3.c src/ivf8_index.c src/ivf8_search.c
 EVALUATE_KDCLASS3_TARGET := $(BUILD_DIR)/evaluate_kdclass3
-EVALUATE_KDCLASS3_SOURCES := tools/evaluate_kdclass3.c src/kdclass3.c src/kdprimary2.c src/fastvector.c src/ivf8_search.c
+EVALUATE_KDCLASS3_SOURCES := tools/evaluate_kdclass3.c src/kdclass3.c src/kdclass3_simd.c src/kdprimary2.c src/fastvector.c src/ivf8_search.c
 EVALUATE_RF_KDCLASS3_TARGET := $(BUILD_DIR)/evaluate_rf_kdclass3
 EVALUATE_RF_KDCLASS3_SOURCES := tools/evaluate_rf_kdclass3.c src/rf_gate_model.c src/kdclass3.c src/fastvector.c src/ivf8_search.c
+EVALUATE_ADAPTIVE_PROBE_TARGET := $(BUILD_DIR)/evaluate_adaptive_probe
+EVALUATE_ADAPTIVE_PROBE_SOURCES := tools/evaluate_adaptive_probe.c src/kdclass3.c src/fastvector.c src/ivf8_index.c src/ivf8_search.c
+EVALUATE_KDCLASS3_OPT_TARGET := $(BUILD_DIR)/evaluate_kdclass3_opt
+EVALUATE_KDCLASS3_OPT_SOURCES := tools/evaluate_kdclass3_opt.c src/kdclass3.c src/kdclass3_simd.c src/kdclass3_opt.c src/fastvector.c src/ivf8_search.c
 
 .PHONY: all clean fdlb fdlb-release test tools release
 
@@ -129,13 +137,21 @@ $(AVX2_OBJECT): src/ivf8_search_avx2.c
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(AVX2_CFLAGS) -c $< -o $@
 
+$(KDCLASS3_BBOX_AVX2_OBJECT): src/kdclass3_bbox_avx2.c
+	mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(AVX2_CFLAGS) -c $< -o $@
+
+$(KDCLASS3_OPT_AVX2_OBJECT): src/kdclass3_search_avx2.c
+	mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(AVX2_CFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/%.o: %.c
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-$(RAW_HTTP_TEST_TARGET): $(RAW_HTTP_TEST_SOURCES) $(AVX2_OBJECT)
+$(RAW_HTTP_TEST_TARGET): $(RAW_HTTP_TEST_SOURCES) $(AVX2_OBJECT) $(KDCLASS3_BBOX_AVX2_OBJECT)
 	mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $(RAW_HTTP_TEST_SOURCES) $(AVX2_OBJECT) -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $(RAW_HTTP_TEST_SOURCES) $(AVX2_OBJECT) $(KDCLASS3_BBOX_AVX2_OBJECT) -o $@
 
 $(FASTVECTOR_TEST_TARGET): $(FASTVECTOR_TEST_SOURCES)
 	mkdir -p $(dir $@)
@@ -149,9 +165,9 @@ $(IVF8_SEARCH_TEST_TARGET): $(IVF8_SEARCH_TEST_SOURCES) $(AVX2_OBJECT)
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(IVF8_SEARCH_TEST_SOURCES) $(AVX2_OBJECT) -o $@
 
-$(FDPASS_TEST_TARGET): $(FDPASS_TEST_SOURCES) $(AVX2_OBJECT)
+$(FDPASS_TEST_TARGET): $(FDPASS_TEST_SOURCES) $(AVX2_OBJECT) $(KDCLASS3_BBOX_AVX2_OBJECT)
 	mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $(FDPASS_TEST_SOURCES) $(AVX2_OBJECT) -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread $(FDPASS_TEST_SOURCES) $(AVX2_OBJECT) $(KDCLASS3_BBOX_AVX2_OBJECT) -o $@
 
 $(FDLB_TEST_TARGET): $(FDLB_TEST_SOURCES)
 	mkdir -p $(dir $@)
@@ -181,9 +197,13 @@ $(KDPRIMARY2_TEST_TARGET): $(KDPRIMARY2_TEST_SOURCES) $(AVX2_OBJECT)
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(KDPRIMARY2_TEST_SOURCES) $(AVX2_OBJECT) -o $@
 
-$(KDCLASS3_TEST_TARGET): $(KDCLASS3_TEST_SOURCES) $(AVX2_OBJECT)
+$(KDCLASS3_TEST_TARGET): $(KDCLASS3_TEST_SOURCES) $(AVX2_OBJECT) $(KDCLASS3_BBOX_AVX2_OBJECT)
 	mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(KDCLASS3_TEST_SOURCES) $(AVX2_OBJECT) -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(KDCLASS3_TEST_SOURCES) $(AVX2_OBJECT) $(KDCLASS3_BBOX_AVX2_OBJECT) -o $@
+
+$(KDCLASS3_OPT_TEST_TARGET): $(KDCLASS3_OPT_TEST_SOURCES) $(AVX2_OBJECT) $(KDCLASS3_OPT_AVX2_OBJECT)
+	mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(KDCLASS3_OPT_TEST_SOURCES) $(AVX2_OBJECT) $(KDCLASS3_OPT_AVX2_OBJECT) -o $@
 
 $(RF_GATE_MODEL_TEST_TARGET): $(RF_GATE_MODEL_TEST_SOURCES)
 	mkdir -p $(dir $@)
@@ -257,17 +277,25 @@ $(BUILD_KDCLASS3_TARGET): $(BUILD_KDCLASS3_SOURCES) $(AVX2_OBJECT)
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(BUILD_KDCLASS3_SOURCES) $(AVX2_OBJECT) -o $@
 
-$(EVALUATE_KDCLASS3_TARGET): $(EVALUATE_KDCLASS3_SOURCES) $(AVX2_OBJECT)
+$(EVALUATE_KDCLASS3_TARGET): $(EVALUATE_KDCLASS3_SOURCES) $(AVX2_OBJECT) $(KDCLASS3_BBOX_AVX2_OBJECT)
 	mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(EVALUATE_KDCLASS3_SOURCES) $(AVX2_OBJECT) -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EVALUATE_KDCLASS3_SOURCES) $(AVX2_OBJECT) $(KDCLASS3_BBOX_AVX2_OBJECT) -o $@
 
 $(EVALUATE_RF_KDCLASS3_TARGET): $(EVALUATE_RF_KDCLASS3_SOURCES) $(AVX2_OBJECT)
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(EVALUATE_RF_KDCLASS3_SOURCES) $(AVX2_OBJECT) -lm -o $@
 
-tools: $(VECTORIZE_C_TARGET) $(INSPECT_INDEX_TARGET) $(EVALUATE_C_TARGET) $(BENCH_SEARCH_TARGET) $(BUILD_KDTREE_TARGET) $(EVALUATE_KDTREE_TARGET) $(EVALUATE_HYBRID_TARGET) $(ANALYZE_REPAIR_POLICY_TARGET) $(BUILD_KDPRIMARY_TARGET) $(EVALUATE_KDPRIMARY_TARGET) $(BUILD_KDPRIMARY2_TARGET) $(EVALUATE_KDPRIMARY2_TARGET) $(BUILD_GATE_DATASET_TARGET) $(EVALUATE_GATE_TARGET) $(BUILD_MODEL_DATASET_TARGET) $(BUILD_RF_DATASET_TARGET) $(BUILD_KDCLASS3_TARGET) $(EVALUATE_KDCLASS3_TARGET) $(EVALUATE_RF_KDCLASS3_TARGET)
+$(EVALUATE_ADAPTIVE_PROBE_TARGET): $(EVALUATE_ADAPTIVE_PROBE_SOURCES) $(AVX2_OBJECT)
+	mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EVALUATE_ADAPTIVE_PROBE_SOURCES) $(AVX2_OBJECT) -o $@
 
-test: $(RAW_HTTP_TEST_TARGET) $(FASTVECTOR_TEST_TARGET) $(IVF8_INDEX_TEST_TARGET) $(IVF8_SEARCH_TEST_TARGET) $(FDPASS_TEST_TARGET) $(FDLB_TEST_TARGET) $(CONFIG_TEST_TARGET) $(FD_QUEUE_TEST_TARGET) $(KDTREE_TEST_TARGET) $(KDTREE_REPAIR_TEST_TARGET) $(KDPRIMARY_TEST_TARGET) $(KDPRIMARY2_TEST_TARGET) $(KDCLASS3_TEST_TARGET) $(RF_GATE_MODEL_TEST_TARGET) tools
+$(EVALUATE_KDCLASS3_OPT_TARGET): $(EVALUATE_KDCLASS3_OPT_SOURCES) $(AVX2_OBJECT) $(KDCLASS3_OPT_AVX2_OBJECT) $(KDCLASS3_BBOX_AVX2_OBJECT)
+	mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EVALUATE_KDCLASS3_OPT_SOURCES) $(AVX2_OBJECT) $(KDCLASS3_OPT_AVX2_OBJECT) $(KDCLASS3_BBOX_AVX2_OBJECT) -o $@
+
+tools: $(VECTORIZE_C_TARGET) $(INSPECT_INDEX_TARGET) $(EVALUATE_C_TARGET) $(BENCH_SEARCH_TARGET) $(BUILD_KDTREE_TARGET) $(EVALUATE_KDTREE_TARGET) $(EVALUATE_HYBRID_TARGET) $(ANALYZE_REPAIR_POLICY_TARGET) $(BUILD_KDPRIMARY_TARGET) $(EVALUATE_KDPRIMARY_TARGET) $(BUILD_KDPRIMARY2_TARGET) $(EVALUATE_KDPRIMARY2_TARGET) $(BUILD_GATE_DATASET_TARGET) $(EVALUATE_GATE_TARGET) $(BUILD_MODEL_DATASET_TARGET) $(BUILD_RF_DATASET_TARGET) $(BUILD_KDCLASS3_TARGET) $(EVALUATE_KDCLASS3_TARGET) $(EVALUATE_RF_KDCLASS3_TARGET) $(EVALUATE_ADAPTIVE_PROBE_TARGET) $(EVALUATE_KDCLASS3_OPT_TARGET)
+
+test: $(RAW_HTTP_TEST_TARGET) $(FASTVECTOR_TEST_TARGET) $(IVF8_INDEX_TEST_TARGET) $(IVF8_SEARCH_TEST_TARGET) $(FDPASS_TEST_TARGET) $(FDLB_TEST_TARGET) $(CONFIG_TEST_TARGET) $(FD_QUEUE_TEST_TARGET) $(KDTREE_TEST_TARGET) $(KDTREE_REPAIR_TEST_TARGET) $(KDPRIMARY_TEST_TARGET) $(KDPRIMARY2_TEST_TARGET) $(KDCLASS3_TEST_TARGET) $(KDCLASS3_OPT_TEST_TARGET) $(RF_GATE_MODEL_TEST_TARGET) tools
 	./$(RAW_HTTP_TEST_TARGET)
 	./$(FASTVECTOR_TEST_TARGET)
 	./$(IVF8_INDEX_TEST_TARGET)
@@ -281,6 +309,7 @@ test: $(RAW_HTTP_TEST_TARGET) $(FASTVECTOR_TEST_TARGET) $(IVF8_INDEX_TEST_TARGET
 	./$(KDPRIMARY_TEST_TARGET)
 	./$(KDPRIMARY2_TEST_TARGET)
 	./$(KDCLASS3_TEST_TARGET)
+	./$(KDCLASS3_OPT_TEST_TARGET)
 	./$(RF_GATE_MODEL_TEST_TARGET)
 
 clean:

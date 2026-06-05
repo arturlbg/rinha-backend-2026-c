@@ -16,6 +16,13 @@
 #define RINHA_MAX_API_PROCESSES 8u
 #define RINHA_DEFAULT_WORKERS 1u
 #define RINHA_DEFAULT_FD_QUEUE_SIZE 1024u
+#define RINHA_DEFAULT_EPOLL_IDLE_US 0u
+#define RINHA_DEFAULT_EPOLL_BUSY_POLL_US 0u
+#define RINHA_DEFAULT_EPOLL_BUSY_POLL_BUDGET 0u
+#define RINHA_DEFAULT_EPOLL_PREFER_BUSY_POLL false
+#define RINHA_MAX_EPOLL_IDLE_US 1000u
+#define RINHA_MAX_EPOLL_BUSY_POLL_US 1000u
+#define RINHA_MAX_EPOLL_BUSY_POLL_BUDGET 256u
 #define RINHA_DEFAULT_INDEX_PATH "/app/resources/index.bin"
 #define RINHA_DEFAULT_INDEX_WARMUP "off"
 #define RINHA_DEFAULT_INDEX_WARMUP_QUERIES 2048u
@@ -28,6 +35,7 @@
 #define RINHA_DEFAULT_KDCLASS3_PATH "/app/resources/kdclass3.bin"
 #define RINHA_DEFAULT_KDCLASS3_TOUCH "false"
 #define RINHA_DEFAULT_KDCLASS3_FALLBACK "none"
+#define RINHA_DEFAULT_KDCLASS3_IMPL "baseline"
 #define RINHA_DEFAULT_KDTREE_PATH "/app/resources/kdtree.bin"
 #define RINHA_DEFAULT_KDTREE_REPAIR_POLICY "boundary23_far45"
 #define RINHA_DEFAULT_IVF8_MAX_CANDIDATES 4096u
@@ -40,6 +48,99 @@
 #ifndef RINHA_ENABLE_METRICS
 #define RINHA_ENABLE_METRICS 1
 #endif
+
+typedef struct {
+    unsigned int idle_us;
+    unsigned int busy_poll_us;
+    unsigned int busy_poll_budget;
+    bool prefer_busy_poll;
+} RinhaEpollTuning;
+
+static inline bool rinha_parse_clamped_u32(const char *raw,
+                                           unsigned int fallback,
+                                           unsigned int maximum,
+                                           unsigned int *out) {
+    if (out == NULL) {
+        return false;
+    }
+    if (raw == NULL || raw[0] == '\0') {
+        *out = fallback;
+        return true;
+    }
+    if (raw[0] == '-') {
+        return false;
+    }
+
+    char *end = NULL;
+    unsigned long long parsed = strtoull(raw, &end, 10);
+    if (end == raw || *end != '\0') {
+        return false;
+    }
+    *out = parsed > maximum ? maximum : (unsigned int)parsed;
+    return true;
+}
+
+static inline bool rinha_parse_bool(const char *raw, bool fallback, bool *out) {
+    if (out == NULL) {
+        return false;
+    }
+    if (raw == NULL || raw[0] == '\0') {
+        *out = fallback;
+        return true;
+    }
+    if (strcmp(raw, "1") == 0 ||
+        strcmp(raw, "true") == 0 ||
+        strcmp(raw, "TRUE") == 0 ||
+        strcmp(raw, "yes") == 0 ||
+        strcmp(raw, "YES") == 0 ||
+        strcmp(raw, "on") == 0 ||
+        strcmp(raw, "ON") == 0) {
+        *out = true;
+        return true;
+    }
+    if (strcmp(raw, "0") == 0 ||
+        strcmp(raw, "false") == 0 ||
+        strcmp(raw, "FALSE") == 0 ||
+        strcmp(raw, "no") == 0 ||
+        strcmp(raw, "NO") == 0 ||
+        strcmp(raw, "off") == 0 ||
+        strcmp(raw, "OFF") == 0) {
+        *out = false;
+        return true;
+    }
+    return false;
+}
+
+static inline bool rinha_parse_epoll_tuning(const char *idle_us,
+                                            const char *busy_poll_us,
+                                            const char *busy_poll_budget,
+                                            const char *prefer_busy_poll,
+                                            RinhaEpollTuning *out) {
+    return out != NULL &&
+        rinha_parse_clamped_u32(idle_us,
+                                RINHA_DEFAULT_EPOLL_IDLE_US,
+                                RINHA_MAX_EPOLL_IDLE_US,
+                                &out->idle_us) &&
+        rinha_parse_clamped_u32(busy_poll_us,
+                                RINHA_DEFAULT_EPOLL_BUSY_POLL_US,
+                                RINHA_MAX_EPOLL_BUSY_POLL_US,
+                                &out->busy_poll_us) &&
+        rinha_parse_clamped_u32(busy_poll_budget,
+                                RINHA_DEFAULT_EPOLL_BUSY_POLL_BUDGET,
+                                RINHA_MAX_EPOLL_BUSY_POLL_BUDGET,
+                                &out->busy_poll_budget) &&
+        rinha_parse_bool(prefer_busy_poll,
+                         RINHA_DEFAULT_EPOLL_PREFER_BUSY_POLL,
+                         &out->prefer_busy_poll);
+}
+
+static inline bool rinha_epoll_tuning_enabled(const RinhaEpollTuning *tuning) {
+    return tuning != NULL &&
+        (tuning->idle_us != 0u ||
+         tuning->busy_poll_us != 0u ||
+         tuning->busy_poll_budget != 0u ||
+         tuning->prefer_busy_poll);
+}
 
 static inline bool rinha_parse_api_processes(const char *raw, unsigned int *out) {
     if (out == NULL) {

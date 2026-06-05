@@ -104,6 +104,38 @@ static bool env_bool(const char *name, bool fallback) {
     exit(1);
 }
 
+static bool env_bool_warn(const char *name, bool fallback) {
+    bool parsed = fallback;
+    const char *raw = getenv(name);
+    if (rinha_parse_bool(raw, fallback, &parsed)) {
+        return parsed;
+    }
+    fprintf(stderr,
+            "warning: invalid %s=%s; using %s\n",
+            name,
+            raw == NULL ? "" : raw,
+            fallback ? "true" : "false");
+    return fallback;
+}
+
+static unsigned long proc_status_kib(const char *field) {
+    FILE *file = fopen("/proc/self/status", "r");
+    if (file == NULL) {
+        return 0;
+    }
+    char line[256];
+    unsigned long value = 0;
+    size_t field_len = strlen(field);
+    while (fgets(line, sizeof(line), file) != NULL) {
+        if (strncmp(line, field, field_len) == 0 &&
+            sscanf(line + field_len, " %lu", &value) == 1) {
+            break;
+        }
+    }
+    fclose(file);
+    return value;
+}
+
 static int16_t clamp_i16_index_value(int32_t value) {
     if (value < -10000) {
         return -10000;
@@ -427,6 +459,24 @@ int main(void) {
         return 1;
     }
 
+    RinhaEpollTuning epoll_tuning;
+    if (!rinha_parse_epoll_tuning(getenv("RINHA_EPOLL_IDLE_US"),
+                                  getenv("RINHA_EPOLL_BUSY_POLL_US"),
+                                  getenv("RINHA_EPOLL_BUSY_POLL_BUDGET"),
+                                  getenv("RINHA_EPOLL_PREFER_BUSY_POLL"),
+                                  &epoll_tuning)) {
+        fprintf(stderr, "invalid RINHA_EPOLL_* tuning value\n");
+        return 1;
+    }
+    if (rinha_epoll_tuning_enabled(&epoll_tuning)) {
+        fprintf(stderr,
+                "epoll_tuning idle_us=%u busy_poll_us=%u busy_poll_budget=%u prefer_busy_poll=%s\n",
+                epoll_tuning.idle_us,
+                epoll_tuning.busy_poll_us,
+                epoll_tuning.busy_poll_budget,
+                epoll_tuning.prefer_busy_poll ? "true" : "false");
+    }
+
 #if RINHA_ENABLE_METRICS
     RinhaMetrics metrics;
     bool debug_timing_enabled = metrics_parse_enabled(getenv("RINHA_DEBUG_TIMING"));
@@ -449,9 +499,10 @@ int main(void) {
         fprintf(stderr, "invalid RINHA_SEARCH_IMPL=%s\n", search_impl_text);
         return 1;
     }
+    bool avx2_available = ivf8_cpu_supports_avx2();
     if (search_mode == RAW_HTTP_SEARCH_IVF8 &&
         search_impl == IVF8_SEARCH_IMPL_AVX2 &&
-        !ivf8_cpu_supports_avx2()) {
+        !avx2_available) {
         fprintf(stderr, "RINHA_SEARCH_IMPL=avx2 requested but AVX2 is unavailable; falling back to scalar\n");
         search_impl = IVF8_SEARCH_IMPL_SCALAR;
         search_impl_text = "scalar";
@@ -471,8 +522,26 @@ int main(void) {
     memset(&kdclass3, 0, sizeof(kdclass3));
     kdclass3.fd = -1;
 
+    KdClass3Impl kdclass3_impl = KDCLASS3_IMPL_BASELINE;
     bool kdclass3_fallback_kdprimary2 = false;
     if (search_mode == RAW_HTTP_SEARCH_KDCLASS3) {
+        const char *impl_text = getenv("RINHA_KDCLASS3_IMPL");
+        if (impl_text == NULL || impl_text[0] == '\0') {
+            impl_text = RINHA_DEFAULT_KDCLASS3_IMPL;
+        }
+        if (!kdclass3_impl_from_string(impl_text, &kdclass3_impl)) {
+            fprintf(stderr,
+                    "warning: invalid RINHA_KDCLASS3_IMPL=%s; using baseline\n",
+                    impl_text);
+            kdclass3_impl = KDCLASS3_IMPL_BASELINE;
+        }
+        if (kdclass3_impl == KDCLASS3_IMPL_SIMD_FULL && !avx2_available) {
+            fprintf(stderr,
+                    "warning: RINHA_KDCLASS3_IMPL=simd_full requested but AVX2 "
+                    "is unavailable; using baseline\n");
+            kdclass3_impl = KDCLASS3_IMPL_BASELINE;
+        }
+
         const char *fallback = getenv("RINHA_KDCLASS3_FALLBACK");
         if (fallback == NULL || fallback[0] == '\0') {
             fallback = RINHA_DEFAULT_KDCLASS3_FALLBACK;
@@ -558,7 +627,21 @@ int main(void) {
         if (kdclass3_path == NULL || kdclass3_path[0] == '\0') {
             kdclass3_path = RINHA_DEFAULT_KDCLASS3_PATH;
         }
-        if (kdclass3_open(kdclass3_path, &kdclass3, err, sizeof(err)) != 0) {
+        KdClass3OpenOptions kdclass3_options = kdclass3_open_options_default();
+        kdclass3_options.populate = env_bool_warn("RINHA_KDCLASS3_POPULATE", false);
+        kdclass3_options.mlock = env_bool_warn("RINHA_KDCLASS3_MLOCK", false);
+        const char *madvise_raw = getenv("RINHA_KDCLASS3_MADVISE");
+        if (!kdclass3_madvise_mode_from_string(madvise_raw, &kdclass3_options.madvise_mode)) {
+            fprintf(stderr,
+                    "warning: invalid RINHA_KDCLASS3_MADVISE=%s; using off\n",
+                    madvise_raw == NULL ? "" : madvise_raw);
+            kdclass3_options.madvise_mode = KDCLASS3_MADVISE_OFF;
+        }
+        if (kdclass3_open_with_options(kdclass3_path,
+                                       &kdclass3,
+                                       &kdclass3_options,
+                                       err,
+                                       sizeof(err)) != 0) {
             fprintf(stderr, "load KD-class3 %s: %s\n", kdclass3_path, err);
             kdprimary2_close(&kdprimary2);
             kdprimary_close(&kdprimary);
@@ -572,8 +655,10 @@ int main(void) {
             touch_sum = kdclass3_touch_pages(&kdclass3);
             touch_elapsed_ns = metrics_now_ns() - start;
         }
+        unsigned long vmrss_kib = proc_status_kib("VmRSS:");
+        unsigned long vmlck_kib = proc_status_kib("VmLck:");
         fprintf(stderr,
-                "kdclass3 enabled=1 path=%s fraud_points=%u legit_points=%u fraud_nodes=%u legit_nodes=%u leaf_size=%u memory_mib=%.2f touch=%s touch_ms=%.3f fallback=%s sink=%llu\n",
+                "kdclass3 enabled=1 path=%s fraud_points=%u legit_points=%u fraud_nodes=%u legit_nodes=%u leaf_size=%u memory_mib=%.2f touch=%s touch_ms=%.3f populate=%s/%s populate_errno=%d madvise=%s/%s madvise_errno=%d mlock=%s/%s mlock_errno=%d vmrss_kib=%lu vmlck_kib=%lu impl=%s avx2_available=%s fallback=%s sink=%llu\n",
                 kdclass3_path,
                 kdclass3.fraud.count,
                 kdclass3.legit.count,
@@ -583,6 +668,22 @@ int main(void) {
                 (double)kdclass3_runtime_memory_bytes(&kdclass3) / 1048576.0,
                 kdclass3_touch ? "true" : "false",
                 (double)touch_elapsed_ns / 1000000.0,
+                kdclass3.populate_requested ? "true" : "false",
+                kdclass3.populate_applied ? "ok" :
+                    (kdclass3.populate_requested ? "failed" : "off"),
+                kdclass3.populate_errno,
+                kdclass3_madvise_mode_name(kdclass3.madvise_mode),
+                kdclass3.madvise_applied ? "ok" :
+                    (kdclass3.madvise_mode == KDCLASS3_MADVISE_OFF ? "off" : "failed"),
+                kdclass3.madvise_errno,
+                kdclass3.mlock_requested ? "true" : "false",
+                kdclass3.mlock_applied ? "ok" :
+                    (kdclass3.mlock_requested ? "failed" : "off"),
+                kdclass3.mlock_errno,
+                vmrss_kib,
+                vmlck_kib,
+                kdclass3_impl_name(kdclass3_impl),
+                avx2_available ? "true" : "false",
                 kdclass3_fallback_kdprimary2 ? "kdprimary2" : "none",
                 (unsigned long long)touch_sum);
         if (search_mode == RAW_HTTP_SEARCH_RF_KDCLASS3) {
@@ -657,6 +758,7 @@ int main(void) {
                      search_mode == RAW_HTTP_SEARCH_RF_KDCLASS3) ? &kdclass3 : NULL,
         .kdtree = kdtree_repair_enabled ? &kdtree : NULL,
         .search_mode = search_mode,
+        .kdclass3_impl = kdclass3_impl,
         .search_config = {
             .max_candidates = env_u32("RINHA_IVF8_MAX_CANDIDATES", RINHA_DEFAULT_IVF8_MAX_CANDIDATES),
             .probes = env_u32("RINHA_IVF8_PROBES", RINHA_DEFAULT_IVF8_PROBES),
@@ -678,6 +780,7 @@ int main(void) {
         .fast_fraud_parser = env_bool("RINHA_FAST_FRAUD_PARSER", false),
         .workers = process_mode == RAW_HTTP_PROCESS_ASYNC_WORKER ? api_workers : workers,
         .queue_size = queue_size,
+        .epoll_tuning = epoll_tuning,
     };
 
     if (search_mode == RAW_HTTP_SEARCH_IVF8) {

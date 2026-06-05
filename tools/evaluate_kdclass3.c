@@ -28,6 +28,7 @@ typedef struct {
     int class_fraud_count;
     int class_legit_count;
     int approved_mismatches_vs_kdprimary2;
+    int result_mismatches_vs_baseline;
     uint64_t *fraud_ns;
     uint64_t *legit_ns;
     uint64_t *class_ns;
@@ -47,7 +48,8 @@ typedef struct {
 static void usage(void) {
     fprintf(stderr,
             "usage: evaluate_kdclass3 --tree <kdclass3.bin> --kdprimary2 <kdprimary2.bin> "
-            "--test-data <test-data.json> [--limit N] [--touch]\n");
+            "--test-data <test-data.json> [--impl baseline|simd_full] "
+            "[--limit N] [--touch]\n");
 }
 
 static uint64_t now_ns(void) {
@@ -316,6 +318,7 @@ int main(int argc, char **argv) {
     const char *test_data_path = NULL;
     int limit = 0;
     bool touch = false;
+    KdClass3Impl impl = KDCLASS3_IMPL_BASELINE;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--tree") == 0 && i + 1 < argc) {
@@ -328,6 +331,11 @@ int main(int argc, char **argv) {
             limit = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--touch") == 0) {
             touch = true;
+        } else if (strcmp(argv[i], "--impl") == 0 && i + 1 < argc) {
+            if (!kdclass3_impl_from_string(argv[++i], &impl)) {
+                usage();
+                return 2;
+            }
         } else {
             usage();
             return 2;
@@ -336,6 +344,10 @@ int main(int argc, char **argv) {
 
     if (tree_path == NULL || kdprimary2_path == NULL || test_data_path == NULL) {
         usage();
+        return 2;
+    }
+    if (impl == KDCLASS3_IMPL_SIMD_FULL && !ivf8_cpu_supports_avx2()) {
+        fprintf(stderr, "evaluate_kdclass3: simd_full requires AVX2\n");
         return 2;
     }
 
@@ -409,8 +421,20 @@ int main(int argc, char **argv) {
         uint64_t class_elapsed = now_ns() - class_start;
 
         uint64_t optimized_start = now_ns();
-        KdClass3SearchResult optimized = kdclass3_search(&index, query);
+        KdClass3SearchResult optimized =
+            impl == KDCLASS3_IMPL_SIMD_FULL
+                ? kdclass3_search_simd_full(&index, query)
+                : kdclass3_search(&index, query);
         uint64_t optimized_elapsed = now_ns() - optimized_start;
+        if (impl == KDCLASS3_IMPL_SIMD_FULL) {
+            KdClass3SearchResult baseline = kdclass3_search(&index, query);
+            if (baseline.fraud_count != optimized.fraud_count ||
+                baseline.fallback_required != optimized.fallback_required ||
+                baseline.fraud_distance3 != optimized.fraud_distance3 ||
+                baseline.legit_distance3 != optimized.legit_distance3) {
+                stats.result_mismatches_vs_baseline++;
+            }
+        }
 
         bool fallback = optimized.fallback_required;
         uint8_t class_fraud_count = optimized.fraud_count;
@@ -464,12 +488,14 @@ int main(int argc, char **argv) {
     printf("tree=%s\n", tree_path);
     printf("kdprimary2=%s\n", kdprimary2_path);
     printf("test_data=%s\n", test_data_path);
+    printf("impl=%s\n", kdclass3_impl_name(impl));
     printf("touch=%s\n", touch ? "true" : "false");
     printf("touch_sum=%llu\n", (unsigned long long)touch_sum);
     printf("kdprimary2_touch_sum=%llu\n", (unsigned long long)kd_touch_sum);
     printf("evaluated=%d\n", stats.total);
     printf("TP=%d\nTN=%d\nFP=%d\nFN=%d\nError=%d\n", stats.tp, stats.tn, stats.fp, stats.fn, stats.errors);
     printf("approved_mismatches_vs_kdprimary2=%d\n", stats.approved_mismatches_vs_kdprimary2);
+    printf("result_mismatches_vs_baseline=%d\n", stats.result_mismatches_vs_baseline);
     printf("fallback_count=%d\n", stats.fallback_count);
     printf("fallback_rate=%.6f\n", stats.total > 0 ? (double)stats.fallback_count / (double)stats.total : 0.0);
     printf("class_fraud_decisions=%d\n", stats.class_fraud_count);
@@ -504,5 +530,9 @@ int main(int argc, char **argv) {
     free(json);
     kdprimary2_close(&kdprimary2);
     kdclass3_close(&index);
-    return stats.errors == 0 && stats.fp == 0 && stats.fn == 0 && stats.approved_mismatches_vs_kdprimary2 == 0 ? 0 : 1;
+    return stats.errors == 0 && stats.fp == 0 && stats.fn == 0 &&
+                   stats.approved_mismatches_vs_kdprimary2 == 0 &&
+                   stats.result_mismatches_vs_baseline == 0
+               ? 0
+               : 1;
 }

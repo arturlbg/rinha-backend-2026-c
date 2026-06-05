@@ -54,10 +54,39 @@ typedef struct {
     const int16_t *block_data;
 } KdClass3TreeIndex;
 
+typedef enum {
+    KDCLASS3_MADVISE_OFF = 0,
+    KDCLASS3_MADVISE_WILLNEED = 1,
+    KDCLASS3_MADVISE_RANDOM = 2,
+    KDCLASS3_MADVISE_SEQUENTIAL = 3,
+    KDCLASS3_MADVISE_HUGEPAGE = 4,
+    KDCLASS3_MADVISE_NOHUGEPAGE = 5
+} KdClass3MadviseMode;
+
+typedef enum {
+    KDCLASS3_IMPL_BASELINE = 0,
+    KDCLASS3_IMPL_SIMD_FULL = 1
+} KdClass3Impl;
+
+typedef struct {
+    bool populate;
+    bool mlock;
+    KdClass3MadviseMode madvise_mode;
+} KdClass3OpenOptions;
+
 typedef struct {
     int fd;
     size_t file_size;
     void *map;
+    bool populate_requested;
+    bool populate_applied;
+    int populate_errno;
+    KdClass3MadviseMode madvise_mode;
+    bool madvise_applied;
+    int madvise_errno;
+    bool mlock_requested;
+    bool mlock_applied;
+    int mlock_errno;
     uint32_t leaf_size;
     KdClass3TreeIndex fraud;
     KdClass3TreeIndex legit;
@@ -110,7 +139,17 @@ void kdclass3_build_free(KdClass3Build *build);
 
 int kdclass3_save(const KdClass3Build *build, const char *path, char *err, size_t err_len);
 int kdclass3_open(const char *path, KdClass3Index *out, char *err, size_t err_len);
+int kdclass3_open_with_options(const char *path,
+                               KdClass3Index *out,
+                               const KdClass3OpenOptions *options,
+                               char *err,
+                               size_t err_len);
 void kdclass3_close(KdClass3Index *index);
+KdClass3OpenOptions kdclass3_open_options_default(void);
+bool kdclass3_madvise_mode_from_string(const char *value, KdClass3MadviseMode *mode);
+const char *kdclass3_madvise_mode_name(KdClass3MadviseMode mode);
+bool kdclass3_impl_from_string(const char *value, KdClass3Impl *impl);
+const char *kdclass3_impl_name(KdClass3Impl impl);
 
 size_t kdclass3_tree_block_data_bytes(uint32_t block_count);
 size_t kdclass3_expected_file_bytes(uint32_t fraud_node_count,
@@ -125,6 +164,14 @@ KdClass3ClassSearchResult kdclass3_search_class3(const KdClass3TreeIndex *tree,
                                                  const int16_t query[IVF8_INDEX_DIMS]);
 KdClass3SearchResult kdclass3_search(const KdClass3Index *index,
                                      const int16_t query[IVF8_INDEX_DIMS]);
+KdClass3SearchResult kdclass3_search_simd_full(
+    const KdClass3Index *index,
+    const int16_t query[IVF8_INDEX_DIMS]);
+
+/* Compiled in a separate AVX2 translation unit; callers must gate on CPU support. */
+uint64_t kdclass3_bbox_distance_avx2(
+    const KdClass3Node *node,
+    const int16_t query[IVF8_INDEX_DIMS]);
 
 /*
  * Binary-label k=5 majority rule:
