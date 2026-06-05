@@ -281,6 +281,12 @@ static void test_search_mode_parse(void) {
     CHECK(raw_http_search_mode_from_string("kdprimary2", &mode, &impl));
     CHECK(mode == RAW_HTTP_SEARCH_KDPRIMARY2);
 
+    CHECK(raw_http_search_mode_from_string("kdclass3", &mode, &impl));
+    CHECK(mode == RAW_HTTP_SEARCH_KDCLASS3);
+
+    CHECK(raw_http_search_mode_from_string("rf_kdclass3", &mode, &impl));
+    CHECK(mode == RAW_HTTP_SEARCH_RF_KDCLASS3);
+
     CHECK(!raw_http_search_mode_from_string("bogus", &mode, &impl));
 }
 
@@ -573,6 +579,7 @@ static void test_valid_body_uses_kdprimary2_response(void) {
         .kdprimary2 = &kdprimary2,
         .search_mode = RAW_HTTP_SEARCH_KDPRIMARY2,
         .metrics = &metrics,
+        .fast_fraud_parser = true,
     };
 
     char req[1024];
@@ -585,6 +592,60 @@ static void test_valid_body_uses_kdprimary2_response(void) {
     CHECK(atomic_load_explicit(&metrics.kdprimary2_points_evaluated_total, memory_order_relaxed) == 5);
     CHECK(atomic_load_explicit(&metrics.kdprimary2_nodes_visited_total, memory_order_relaxed) > 0);
     kdprimary2_build_free(&build);
+}
+
+static void test_valid_body_uses_kdclass3_response(void) {
+    int16_t query[FASTVECTOR_DIMENSIONS];
+    CHECK(fastvector_vectorize(valid_payload(), strlen(valid_payload()), query));
+
+    int16_t vectors[6 * IVF8_INDEX_DIMS];
+    uint8_t labels[6] = {1, 1, 1, 0, 0, 0};
+    for (uint32_t point = 0; point < 6; point++) {
+        memcpy(vectors + (size_t)point * IVF8_INDEX_DIMS, query, IVF8_INDEX_DIMS * sizeof(int16_t));
+        vectors[(size_t)point * IVF8_INDEX_DIMS] += (int16_t)(point < 3 ? point : 100 + point);
+    }
+
+    char err[256];
+    KdClass3Build build;
+    CHECK(kdclass3_build_from_points(&build, vectors, labels, 6, 4, err, sizeof(err)) == 0);
+    KdClass3Index kdclass3 = {
+        .leaf_size = build.leaf_size,
+        .fraud = {
+            .count = build.fraud.count,
+            .node_count = build.fraud.node_count,
+            .block_count = build.fraud.block_count,
+            .root = build.fraud.root,
+            .nodes = build.fraud.nodes,
+            .block_data = build.fraud.block_data,
+        },
+        .legit = {
+            .count = build.legit.count,
+            .node_count = build.legit.node_count,
+            .block_count = build.legit.block_count,
+            .root = build.legit.root,
+            .nodes = build.legit.nodes,
+            .block_data = build.legit.block_data,
+        },
+    };
+    RinhaMetrics metrics;
+    metrics_init(&metrics, true);
+    raw_http_app app = {
+        .kdclass3 = &kdclass3,
+        .search_mode = RAW_HTTP_SEARCH_KDCLASS3,
+        .metrics = &metrics,
+        .fast_fraud_parser = true,
+    };
+
+    char req[1024];
+    size_t req_len = make_request(req, sizeof(req), "POST", "/fraud-score", valid_payload());
+    test_chunk chunks[] = {{req, req_len}};
+    char out[2048];
+    size_t out_len = run_connection_with_app(chunks, 1, out, sizeof(out), &app);
+    CHECK(contains_text(out, out_len, "{\"approved\":false,\"fraud_score\":0.6}"));
+    CHECK(atomic_load_explicit(&metrics.kdclass3_search_count, memory_order_relaxed) == 1);
+    CHECK(atomic_load_explicit(&metrics.kdclass3_fallback_count, memory_order_relaxed) == 0);
+    CHECK(atomic_load_explicit(&metrics.kdclass3_fraud_decisions, memory_order_relaxed) == 1);
+    kdclass3_build_free(&build);
 }
 
 static void test_metrics_counts_and_debug(void) {
@@ -650,6 +711,7 @@ int main(void) {
     test_valid_body_uses_search_response();
     test_valid_body_uses_kdprimary_response();
     test_valid_body_uses_kdprimary2_response();
+    test_valid_body_uses_kdclass3_response();
     test_metrics_counts_and_debug();
 
     if (failures != 0) {

@@ -1,14 +1,14 @@
 services:
   lb:
-    image: ${RINHA_FDLB_IMAGE:-rinha-c-fdlb:local}
+    image: rinha-c-fdlb:local
     platform: linux/amd64
     ports:
       - "9999:9999"
     environment:
       RINHA_LB_ADDR: ":9999"
       RINHA_FDPASS_UPSTREAMS: "/sockets/api1.ctrl,/sockets/api2.ctrl"
-      RINHA_LB_CONNECT_RETRY_MS: "${RINHA_LB_CONNECT_RETRY_MS:-25}"
-      RINHA_LB_STARTUP_TIMEOUT_MS: "${RINHA_LB_STARTUP_TIMEOUT_MS:-10000}"
+      RINHA_FDLB_LEAN: "true"
+      RINHA_FDLB_ACCEPT_BATCH: "64"
     volumes:
       - sockets:/sockets
     depends_on:
@@ -16,23 +16,26 @@ services:
         condition: service_healthy
       api2:
         condition: service_healthy
-    cpus: "${LB_CPUS:-0.05}"
-    mem_limit: "${LB_MEMORY:-16m}"
+    cpus: "0.16"
+    mem_limit: "30m"
     networks:
       - rinha
 
   api1:
-    image: ${RINHA_API_IMAGE:-rinha-c-preview:kdprimary2-l64}
+    image: rinha-c-preview:kdclass3-l64
     platform: linux/amd64
     user: "0:0"
     environment:
+      RINHA_SEARCH_IMPL: "kdclass3"
+      RINHA_KDCLASS3_PATH: "/app/resources/kdclass3.bin"
+      RINHA_KDCLASS3_TOUCH: "true"
+      RINHA_KDCLASS3_FALLBACK: "none"
       RINHA_LISTEN_MODE: "fdpass"
-      RINHA_UNIX_SOCKET: "/sockets/api1.ctrl"
-      RINHA_SEARCH_IMPL: "kdprimary2"
-      RINHA_KDPRIMARY2_PATH: "/app/resources/kdprimary2.bin"
-      RINHA_KDPRIMARY2_TOUCH: "true"
       RINHA_EXEC_MODE: "epoll"
+      RINHA_API_PROCESS_MODE: "sync"
+      RINHA_API_PROCESSES: "1"
       RINHA_METRICS_ENABLED: "false"
+      RINHA_UNIX_SOCKET: "/sockets/api1.ctrl"
     volumes:
       - sockets:/sockets
     healthcheck:
@@ -41,23 +44,26 @@ services:
       timeout: 1s
       retries: 60
       start_period: 1s
-    cpus: "${API_CPUS:-0.475}"
-    mem_limit: "${API_MEMORY:-167m}"
+    cpus: "0.42"
+    mem_limit: "160m"
     networks:
       - rinha
 
   api2:
-    image: ${RINHA_API_IMAGE:-rinha-c-preview:kdprimary2-l64}
+    image: rinha-c-preview:kdclass3-l64
     platform: linux/amd64
     user: "0:0"
     environment:
+      RINHA_SEARCH_IMPL: "kdclass3"
+      RINHA_KDCLASS3_PATH: "/app/resources/kdclass3.bin"
+      RINHA_KDCLASS3_TOUCH: "true"
+      RINHA_KDCLASS3_FALLBACK: "none"
       RINHA_LISTEN_MODE: "fdpass"
-      RINHA_UNIX_SOCKET: "/sockets/api2.ctrl"
-      RINHA_SEARCH_IMPL: "kdprimary2"
-      RINHA_KDPRIMARY2_PATH: "/app/resources/kdprimary2.bin"
-      RINHA_KDPRIMARY2_TOUCH: "true"
       RINHA_EXEC_MODE: "epoll"
+      RINHA_API_PROCESS_MODE: "sync"
+      RINHA_API_PROCESSES: "1"
       RINHA_METRICS_ENABLED: "false"
+      RINHA_UNIX_SOCKET: "/sockets/api2.ctrl"
     volumes:
       - sockets:/sockets
     healthcheck:
@@ -66,8 +72,8 @@ services:
       timeout: 1s
       retries: 60
       start_period: 1s
-    cpus: "${API_CPUS:-0.475}"
-    mem_limit: "${API_MEMORY:-167m}"
+    cpus: "0.42"
+    mem_limit: "160m"
     networks:
       - rinha
 
