@@ -16,7 +16,7 @@ services:
         condition: service_healthy
       api2:
         condition: service_healthy
-    cpus: "0.20"
+    cpus: "0.18"
     mem_limit: "30m"
     networks:
       - rinha
@@ -46,7 +46,7 @@ services:
       timeout: 1s
       retries: 60
       start_period: 1s
-    cpus: "0.40"
+    cpus: "0.41"
     mem_limit: "160m"
     networks:
       - rinha
@@ -76,7 +76,7 @@ services:
       timeout: 1s
       retries: 60
       start_period: 1s
-    cpus: "0.40"
+    cpus: "0.41"
     mem_limit: "160m"
     networks:
       - rinha
