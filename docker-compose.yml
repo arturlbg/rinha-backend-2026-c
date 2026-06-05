@@ -1,6 +1,6 @@
 services:
   lb:
-    image: ghcr.io/arturlbg/rinha-backend-2026-c:fdlb
+    image: ghcr.io/arturlbg/rinha-backend-2026-c:fdlb-workers2
     platform: linux/amd64
     ports:
       - "9999:9999"
@@ -9,6 +9,7 @@ services:
       RINHA_FDPASS_UPSTREAMS: "/sockets/api1.ctrl,/sockets/api2.ctrl"
       RINHA_FDLB_LEAN: "true"
       RINHA_FDLB_ACCEPT_BATCH: "16"
+      RINHA_FDLB_WORKERS: "2"
     volumes:
       - sockets:/sockets
     depends_on:
@@ -16,7 +17,7 @@ services:
         condition: service_healthy
       api2:
         condition: service_healthy
-    cpus: "0.22"
+    cpus: "0.20"
     mem_limit: "30m"
     networks:
       - rinha
@@ -46,7 +47,7 @@ services:
       timeout: 1s
       retries: 60
       start_period: 1s
-    cpus: "0.39"
+    cpus: "0.40"
     mem_limit: "160m"
     networks:
       - rinha
@@ -76,7 +77,7 @@ services:
       timeout: 1s
       retries: 60
       start_period: 1s
-    cpus: "0.39"
+    cpus: "0.40"
     mem_limit: "160m"
     networks:
       - rinha
