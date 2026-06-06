@@ -78,6 +78,7 @@ typedef struct {
     uint32_t workers;
     uint32_t queue_size;
     RinhaEpollTuning epoll_tuning;
+    bool fdpass_fast_adopt;
 } raw_http_app;
 
 struct raw_http_conn {

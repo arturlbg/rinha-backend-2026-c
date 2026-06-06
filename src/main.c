@@ -781,6 +781,7 @@ int main(void) {
         .workers = process_mode == RAW_HTTP_PROCESS_ASYNC_WORKER ? api_workers : workers,
         .queue_size = queue_size,
         .epoll_tuning = epoll_tuning,
+        .fdpass_fast_adopt = env_bool("RINHA_FDPASS_FAST_ADOPT", false),
     };
 
     if (search_mode == RAW_HTTP_SEARCH_IVF8) {

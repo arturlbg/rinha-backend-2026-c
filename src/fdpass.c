@@ -494,6 +494,50 @@ static void dispatch_epoll_client_fd(fdpass_runtime *runtime, int client_fd, int
     raw_http_conn_init(conn, client_fd, runtime->app);
     conn->close_feedback_fd = feedback_fd;
 
+    bool fast_adopt = false;
+    const raw_http_app *app = runtime->app;
+    if (app != NULL && app->fdpass_fast_adopt) {
+        fast_adopt = true;
+    }
+
+    if (fast_adopt) {
+        uint32_t status = raw_http_conn_on_readable(conn);
+        if (status == RAW_HTTP_CONN_WANT_WRITE) {
+            status = raw_http_conn_on_writable(conn);
+        }
+        if (status == RAW_HTTP_CONN_CLOSED || conn->closed) {
+            epoll_note_close(runtime_metrics(runtime));
+            free(conn);
+            return;
+        }
+        if (raw_http_conn_wants_write(conn)) {
+            struct epoll_event event;
+            memset(&event, 0, sizeof(event));
+            event.events = EPOLLOUT | EPOLLRDHUP | EPOLLERR | EPOLLHUP;
+            event.data.ptr = conn;
+            if (epoll_ctl(runtime->epoll_fd, EPOLL_CTL_ADD, client_fd, &event) != 0) {
+                raw_http_conn_close(conn);
+                free(conn);
+                return;
+            }
+            epoll_note_open(runtime_metrics(runtime));
+            return;
+        }
+        if (status != RAW_HTTP_CONN_WANT_READ) {
+            epoll_note_open(runtime_metrics(runtime));
+            struct epoll_event event;
+            memset(&event, 0, sizeof(event));
+            event.events = EPOLLIN | EPOLLRDHUP | EPOLLERR | EPOLLHUP;
+            event.data.ptr = conn;
+            if (epoll_ctl(runtime->epoll_fd, EPOLL_CTL_ADD, client_fd, &event) != 0) {
+                raw_http_conn_close(conn);
+                free(conn);
+                return;
+            }
+            return;
+        }
+    }
+
     struct epoll_event event;
     memset(&event, 0, sizeof(event));
     event.events = EPOLLIN | EPOLLRDHUP | EPOLLERR | EPOLLHUP;
